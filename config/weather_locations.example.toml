@@ -1,0 +1,27 @@
+# Weather locations for Open-Meteo ingestion.
+#
+# Copy to config/weather_locations.toml (or set WEATHER_LOCATIONS_FILE) and add
+# one [[location]] table per site. Coordinates must come from a verified source
+# (plant records, survey, PPA schedule, ...). Do not estimate them.
+#
+# Fields:
+#   code               required  Stable upper-case identifier, e.g. "RJ_SOLAR_PARK_1".
+#                                Stored as pi.weather_location.location_code; also the raw-data folder.
+#                                Never reuse a code for different coordinates.
+#   name               required  Human-readable name.
+#   latitude           required  WGS84 decimal degrees, -90..90, at most 7 decimal places.
+#   longitude          required  WGS84 decimal degrees, -180..180, at most 7 decimal places.
+#   coordinate_source  required  Where the coordinates were verified (document, date, owner).
+#   elevation_m        optional  Site elevation in metres.
+#   plant_code         optional  Must already exist in pi.plant (links the location to a plant).
+#   state_code         optional  Must already exist in pi.state.
+#   region_code        optional  Must already exist in pi.region.
+#
+# Example (placeholder values; replace everything before use):
+#
+# [[location]]
+# code = "EXAMPLE_SITE"
+# name = "Example solar site"
+# latitude = 0.0
+# longitude = 0.0
+# coordinate_source = "Replace with the document that verifies these coordinates"

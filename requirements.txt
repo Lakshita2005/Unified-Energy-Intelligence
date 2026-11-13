@@ -1,0 +1,14 @@
+# Runtime
+SQLAlchemy>=2.0.30,<2.1
+alembic>=1.16,<2
+psycopg[binary]>=3.2,<4
+httpx>=0.27,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+python-dotenv>=1.0,<2
+xlrd>=2.0.1,<3          # CEA .xls reports (BIFF)
+pdfplumber>=0.11.4,<0.12  # CEA monthly PDF reports
+
+# Testing
+pytest>=8.0,<10
+xlwt==1.3.0              # builds synthetic .xls fixtures for CEA tests

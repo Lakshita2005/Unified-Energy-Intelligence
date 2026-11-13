@@ -1,0 +1,191 @@
+# Price Intelligence – Data Ingestion
+
+Foundation for ingesting price data from external sources into PostgreSQL.
+Source-specific pipelines are not implemented yet; this repository provides the
+shared infrastructure they will build on.
+
+## Layout
+
+| Path | Responsibility |
+|---|---|
+| `config/settings.py` | Typed settings loaded from environment variables / `.env` |
+| `src/common/logging_config.py` | Centralised logging (console + rotating file, text or JSON) |
+| `src/common/database.py` | SQLAlchemy engine/session management, declarative `Base` |
+| `src/common/http_client.py` | HTTPX client with timeouts, retry/backoff, typed errors |
+| `src/common/raw_storage.py` | Write-once raw payload storage with checksums and metadata |
+| `src/common/exceptions.py` | Project exception hierarchy |
+| `src/ingestion/` | Source extractors (fetch raw data) |
+| `src/transformations/` | Raw → canonical record transformations |
+| `src/loaders/` | Persist canonical records to PostgreSQL |
+| `src/pipelines/` | Orchestrate ingestion → storage → transform → load |
+| `src/scheduler/` | Trigger pipelines on a schedule |
+| `migrations/` | Alembic migrations (URL built from `DB_*` env vars) |
+| `tests/unit/`, `tests/integration/` | Tests; integration tests need a live database |
+| `scripts/` | Operational scripts |
+| `raw_data/`, `logs/` | Default local data and log directories (git-ignored) |
+
+## Setup
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate            # Windows  (source .venv/bin/activate on Linux/macOS)
+pip install -r requirements.txt
+copy .env.example .env            # then fill in DB_HOST, DB_NAME, DB_USER (and DB_PASSWORD if needed)
+python -m scripts.check_db_connection
+```
+
+## Database health check
+
+```bash
+python -m scripts.db_health_check          # human-readable report
+python -m scripts.db_health_check --json   # JSON on stdout (logs go to stderr)
+```
+
+Runs in a read-only transaction and verifies the connection, that the current
+database/user match `DB_NAME`/`DB_USER`, that `DB_SCHEMA` (default `pi`) exists
+and is usable, and that every table in `config/expected_schema.py` is present.
+It lists all tables with column counts. Missing tables are reported, never
+created. Exit codes: `0` healthy, `1` unhealthy, `2` configuration error.
+
+The `pi` schema is managed outside Alembic (there is no `alembic_version`
+table). `migrations/env.py` excludes tables without ORM models, so autogenerate
+will never propose dropping them. Agree on a baseline strategy before running
+`alembic upgrade`, which would create `alembic_version`.
+
+## Ingestion framework
+
+Source pipelines subclass `src.ingestion.base.BaseIngestionPipeline`, declare
+`source`, `dataset`, `target_table` and `natural_key`, and implement:
+
+- `fetch(context)` → `RawDocument`s, unmodified, with `retrieved_at` (ours) and
+  `published_at` (the source's) kept separate. Use `self.http` for HTTP.
+- `parse(document, context)` → `ParseResult` (records + parse failures). No DB access.
+- `validator()` (optional) → rules from `src.ingestion.validation`.
+
+`run()` handles everything else: registration in `pi.data_source` /
+`pi.source_dataset`, `pi.ingestion_run` status tracking, raw storage with
+SHA-256 (before any DB work, never deleted), `pi.source_document`
+(dedupe on checksum), idempotent loading via `src.loaders.table_loader.TableLoader`,
+rejected records in `pi.data_quality_issue` plus a `<dataset>-rejected` raw file,
+and retries for transient network failures. Each document is one transaction.
+
+`tests/support/mock_pipeline.py` is a complete worked example (test-only).
+
+## Open-Meteo pipeline
+
+Hourly forecast and historical weather for configured locations into
+`pi.open_meteo_weather`. Locations go in `config/weather_locations.toml`
+(copy the `.example.toml`). Full details: `docs/open_meteo_pipeline.md`.
+
+```bash
+python -m scripts.ingest_open_meteo locations
+python -m scripts.ingest_open_meteo forecast --location SITE_CODE --dry-run
+python -m scripts.ingest_open_meteo historical --location SITE_CODE --start-date 2026-11-01 --end-date 2026-11-05
+```
+
+`TEST_ONLY_DELHI_GRID` (in `config/weather_locations.test_only.toml`) is a
+technical test point, not a plant. Its data must not be used for analysis, and
+it is never included unless named with `--location`.
+
+## NPP pipeline
+
+All-India real-time demand and generation (source: MERIT India, via undocumented
+NPP dashboard endpoints) into `pi.npp_demand_generation`. One run per IST day,
+at most 31 days per command. Full details: `docs/npp_pipeline.md`.
+
+```bash
+python -m scripts.ingest_npp demand --date 2026-11-11 --dry-run
+python -m scripts.ingest_npp generation --start-date 2026-11-01 --end-date 2026-11-11
+```
+
+## IEX pipeline
+
+DAM, GDAM and RTM 15-minute clearing prices (MCP as area `MKT`, plus 13 bid-area
+prices for DAM/GDAM) into `pi.iex_market_price`. IEX's website terms restrict use
+to personal, non-commercial purposes unless authorised. Full details:
+`docs/iex_pipeline.md`.
+
+```bash
+python -m scripts.ingest_iex reference
+python -m scripts.ingest_iex dam --date 2026-11-10 --dry-run
+python -m scripts.ingest_iex rtm --start-date 2026-11-01 --end-date 2026-11-10
+```
+
+## CEA pipeline
+
+CEA daily coal stock (`cea_coal_stock_daily`), unit outages from DGR sub-report 10
+(`cea_dgr_unit_outage`), station generation and coal stock days from DGR sub-report 2
+(`cea_dgr_plant_daily`), and the monthly state-wise energy / peak power supply position
+(`cea_power_supply_position`, Alembic migration `0001_cea`). The plant / unit / state
+reference data is seeded from CEA reports by an explicit command. DGR reports state
+"for operational purpose only and not for commercial purpose". Full details:
+`docs/cea_pipeline.md`.
+
+```bash
+alembic upgrade head                                   # once: applies 0001_cea
+python -m scripts.ingest_cea reference --dry-run       # then without --dry-run
+python -m scripts.ingest_cea coal --date 2026-11-11 --dry-run
+python -m scripts.ingest_cea outages --start-date 2026-11-05 --end-date 2026-11-11
+python -m scripts.ingest_cea psp-energy --month 2026-08
+```
+
+## Grid-India pipeline
+
+NLDC Daily PSP workbook (XLS from 2023): each workbook is downloaded and stored
+once and parsed by one pipeline per table, each with its own ingestion run.
+Implemented: Section A (`grid_daily_power_supply`, All India = NULL region),
+Sections C + J (`grid_state_power_supply`), Section G (`grid_sourcewise_generation`) and
+Section F (`grid_generation_outage`). Availability: actual upload time
+from 2025-05-12, else an explicit D+2 09:00 IST estimate (Alembic `0002_grid_india`).
+Terms of use not yet verified. Full details: `docs/grid_india_pipeline.md`.
+
+```bash
+python -m scripts.ingest_grid_india psp --date 2026-11-10 --dry-run
+python -m scripts.ingest_grid_india psp --start-date 2026-11-04 --end-date 2026-11-09
+```
+
+## Common commands
+
+```bash
+pytest                            # all tests; integration tests skip if DB_* is unset
+pytest tests/unit                 # unit tests only
+pytest -m integration             # integration tests only
+
+alembic revision --autogenerate -m "describe change"
+alembic upgrade head
+alembic upgrade head --sql        # print SQL without connecting
+```
+
+When you add ORM models, subclass `src.common.database.Base` and import the
+model module in `migrations/env.py` so autogenerate can detect them.
+
+## Usage sketch
+
+```python
+from src.common.logging_config import setup_logging, get_logger
+from src.common.http_client import HttpClient
+from src.common.raw_storage import create_raw_storage_manager
+from src.common.database import get_database_manager
+
+setup_logging()
+logger = get_logger(__name__)
+storage = create_raw_storage_manager()
+
+with HttpClient(base_url="https://api.example.com") as client:
+    response = client.get("/prices", params={"date": "2026-01-01"})
+    stored = storage.save_bytes(response.content, source="example_api",
+                                dataset="daily_prices", extension="json")
+
+with get_database_manager().session_scope() as session:
+    ...
+```
+
+## Conventions
+
+- **Secrets** come only from the environment. `.env` is git-ignored.
+- **Raw data is immutable**: keys are `source/dataset/YYYY/MM/DD/dataset_<UTC ts>Z.ext`,
+  each with a `.meta.json` sidecar containing size and SHA-256.
+- **HTTP**: only idempotent methods are retried by default (pass `retry=True` to
+  opt in for POST). Query strings are stripped from logs and errors.
+- **Logging**: each worker process should use its own `LOG_FILE_NAME`
+  (`RotatingFileHandler` is not multi-process safe).

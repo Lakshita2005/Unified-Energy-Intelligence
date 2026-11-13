@@ -1,0 +1,17 @@
+{
+  "market": "MOCK_DAM",
+  "area": "MOCK_A1",
+  "delivery_date": "2026-11-10",
+  "published_at": "2026-11-09T13:05:00+05:30",
+  "prices": [
+    {"block": 1, "price": 3500.1250},
+    {"block": 2, "price": 3600.00},
+    {"block": 3, "price": 3725.5},
+    {"block": 4, "price": -15.00},
+    {"block": 97, "price": 3800.00},
+    {"block": 5, "price": "not-a-number"},
+    {"block": 6, "price": 10500.00},
+    {"block": 7, "price": 3999.12345},
+    {"block": 2, "price": 3600.0}
+  ]
+}

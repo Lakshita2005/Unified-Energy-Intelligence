@@ -1,0 +1,24 @@
+# TEST ONLY - technical verification of the Open-Meteo pipeline.
+#
+# This is NOT a solar plant and NOT a business location. Its weather data must
+# not be used for forecasting, analysis or reporting.
+#
+# Kept separate from config/weather_locations.toml so production configuration
+# stays clean. Use it only by pointing WEATHER_LOCATIONS_FILE at it for a single
+# command and naming the location explicitly, e.g. (Git Bash):
+#
+#   WEATHER_LOCATIONS_FILE=config/weather_locations.test_only.toml \
+#       python -m scripts.ingest_open_meteo forecast --location TEST_ONLY_DELHI_GRID --forecast-days 1
+#
+# Safeguards for TEST_ONLY_* codes: they cannot reference a plant, and runs
+# without --location never include them.
+#
+# To move to real sites, add verified plants to config/weather_locations.toml
+# (see weather_locations.example.toml). Nothing here needs to change.
+
+[[location]]
+code = "TEST_ONLY_DELHI_GRID"
+name = "TEST ONLY - pipeline verification point (not a plant)"
+latitude = 28.6
+longitude = 77.2
+coordinate_source = "Synthetic round-number point (28.6 N, 77.2 E, New Delhi area) chosen only for technical testing; not a surveyed or plant location"
