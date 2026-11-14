@@ -6,7 +6,7 @@ Actual - Schedule (80 of 324 values differ by up to 0.013 MU in the 2023-2026
 workbooks), so it cannot be derived without changing published values.
 Additive: one nullable column; nothing is dropped or rewritten.
 
-Revision ID: 0003_grid_regional_exchange_od_ud
+Revision ID: 0003_grid_regional_exch_od_ud
 Revises: 0002_grid_india
 Create Date: 2026-11-13
 """
@@ -18,7 +18,7 @@ from alembic import context, op
 
 from config.settings import get_settings
 
-revision = "0003_grid_regional_exchange_od_ud"
+revision = "0003_grid_regional_exch_od_ud"
 down_revision = "0002_grid_india"
 branch_labels = None
 depends_on = None

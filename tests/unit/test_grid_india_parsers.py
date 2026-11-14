@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -319,3 +319,356 @@ def test_section_f_published_totals_that_do_not_add_up_are_reported() -> None:
 def test_section_f_missing_section_fails() -> None:
     with pytest.raises(InvalidWorkbookError, match="section F not found"):
         parse_section_f(wb(omit_section="F"))
+
+
+# ------------------------------------------------------------------ section E
+
+from src.pipelines.grid_india.parse_psp import EXCHANGE_FIELDS, parse_section_e  # noqa: E402
+from tests.support.grid_india import SECTION_E  # noqa: E402
+
+
+def test_section_e_signed_values_per_region_and_convention() -> None:
+    result = parse_section_e(wb())
+    assert not result.failures and not result.unknown_labels and not result.missing_fields
+    assert result.sign_convention == "Import(+ve)/Export(-ve); OD(+)/UD(-)"
+    by_region = {r.values["region_code"]: r.values for r in result.records}
+    assert set(by_region) == {"NR", "WR", "SR", "ER", "NER"}  # no TOTAL row
+    er = by_region["ER"]
+    assert (er["scheduled_exchange_mu"], er["actual_exchange_mu"], er["od_ud_mu"]) == (
+        Decimal("-162.4010"), Decimal("-184.5930"), Decimal("-22.2000"))  # signs and published O/D/U/D kept
+    assert er["sign_convention"] == result.sign_convention and "exchange_direction" not in er
+    assert len(result.totals) == 3 and all(abs(c - p) <= Decimal("0.05") for _, c, p in result.totals)
+    # published O/D/U/D differs from Actual - Schedule only by rounding
+    assert len(result.od_checks) == 6 and all(abs(c - p) <= Decimal("0.05") for _, c, p in result.od_checks)
+
+
+@pytest.mark.parametrize("variant", [{"with_j": False}, {"g_padding_rows": 3}, {"section_c": default_section_c()[:-5]}])
+def test_section_e_is_found_by_label_in_historical_layouts(variant: dict) -> None:
+    result = parse_section_e(wb(**variant))
+    assert len(result.records) == 5 and not result.failures
+
+
+def test_exchange_row_mapping_covers_every_published_label() -> None:
+    assert {EXCHANGE_FIELDS[label.upper().replace(" ", "")] for label, _ in SECTION_E} == {
+        "scheduled_exchange_mu", "actual_exchange_mu", "od_ud_mu"}
+
+
+def test_section_e_unknown_row_dash_and_bad_value() -> None:
+    rows = [("Schedule(MU)", [1.5, -1.5, "-", 0.0, 0.0]), ("Actual(MU)", [2.5, -2.0, 0.5, "x", 0.0]),
+            ("O/D/U/D(MU)", [1.0, -0.5, 0.5, 0.0, 0.0]), ("Net Transfer(MU)", [1, 1, 1, 1, 1])]
+    result = parse_section_e(wb(section_e=rows))
+    assert result.unknown_labels == ["Net Transfer(MU)"]
+    assert len(result.failures) == 1 and "ER" in result.failures[0].description
+    sr = next(r.values for r in result.records if r.values["region_code"] == "SR")
+    assert sr["scheduled_exchange_mu"] is None and sr["actual_exchange_mu"] == Decimal("0.5000")
+
+
+def test_section_e_without_od_row_is_reported_not_derived() -> None:
+    result = parse_section_e(wb(section_e=SECTION_E[:2]))
+    assert result.missing_fields == ["od_ud_mu"] and result.od_checks == []
+    assert all(r.values["od_ud_mu"] is None for r in result.records)
+
+
+def test_section_e_total_and_od_discrepancies_are_reported() -> None:
+    rows = [SECTION_E[0], SECTION_E[1], ("O/D/U/D(MU)", [3.82, 1.55, 0.86, -25.0, -1.46])]
+    result = parse_section_e(wb(section_e=rows, e_total_override={"Actual(MU)": -20.0}))
+    assert [w for w, c, p in result.totals if abs(c - p) > Decimal("0.05")] == ["actual_exchange_mu (sum of regions vs TOTAL)"]
+    assert {w for w, c, p in result.od_checks if abs(c - p) > Decimal("0.05")} == {"ER", "TOTAL"}
+
+
+def test_section_e_requires_sign_convention_header_and_rows() -> None:
+    with pytest.raises(InvalidWorkbookError, match="sign convention"):
+        parse_section_e(wb(e_heading="E. Import/Export by Regions (in MU)"))
+    with pytest.raises(InvalidWorkbookError, match="rows not found"):
+        parse_section_e(wb(section_e=[SECTION_E[2]]))
+    with pytest.raises(InvalidWorkbookError, match="section E not found"):
+        parse_section_e(wb(omit_section="E"))
+
+
+# ------------------------------------------------------------------ IR-Line
+
+from src.pipelines.grid_india.parse_psp import parse_intl_lines, parse_ir_lines  # noqa: E402
+from src.pipelines.grid_india.reference import COUNTRIES, INTERNATIONAL_LINES, line_country  # noqa: E402
+from tests.support.grid_india import INTL_ROWS, IR_BLOCKS  # noqa: E402
+
+
+def test_ir_lines_regions_values_signs_and_convention() -> None:
+    result = parse_ir_lines(wb())
+    assert not result.failures and not result.unknown_rows and len(result.records) == 6
+    assert result.direction_convention == "Import=(+ve) /Export =(-ve) for NET (MU)"
+    by_line = {r.values["line_name"]: r.values for r in result.records}
+    gaya = by_line["TEST GAYA-VARANASI"]
+    assert (gaya["from_region_code"], gaya["to_region_code"], gaya["voltage_level"], gaya["circuits"]) == (
+        "ER", "NR", "765 kV", "2")
+    assert (gaya["max_import_mw"], gaya["max_export_mw"], gaya["import_mu"], gaya["export_mu"], gaya["net_exchange_mu"]) \
+        == (Decimal("357.013"), Decimal("1339.017"), Decimal("0.0130"), Decimal("17.2170"), Decimal("-17.2040"))
+    assert by_line["TEST PUSAULI B/B"]["circuits"] is None  # '-' in the source
+    assert by_line["TEST GWALIOR-AGRA"]["from_region_code"] == "WR"
+    assert all(r.values["direction_convention"] == result.direction_convention for r in result.records)
+
+
+def test_ir_subtotals_reconcile_and_single_excluded_line_is_identified() -> None:
+    result = parse_ir_lines(wb())
+    by_pair = {pair: (total, published, excluded) for pair, total, published, excluded in result.subtotals}
+    assert set(by_pair) == {"ER-NR", "ER-SR", "WR-NR"}
+    assert by_pair["ER-NR"][2] is None and by_pair["ER-NR"][0] == by_pair["ER-NR"][1]
+    assert by_pair["ER-SR"][2] == "TEST TALCHER-I/C"   # published subtotal leaves this line out
+    off = parse_ir_lines(wb(ir_subtotal_override={"ER-NR": (1.0, 2.0, -1.0)}))
+    assert {p: e for p, t, pub, e in off.subtotals}["ER-NR"] is None  # unexplained gap
+    assert any(p == "ER-NR" and t != pub for p, t, pub, _ in off.subtotals)
+
+
+@pytest.mark.parametrize("variant", [{"with_j": False}, {"g_padding_rows": 3}, {"section_c": default_section_c()[:-5]}])
+def test_ir_line_sheet_parses_regardless_of_other_sheet_layouts(variant: dict) -> None:
+    workbook = wb(**variant)
+    assert len(parse_ir_lines(workbook).records) == 6
+    assert len(parse_intl_lines(workbook, line_country=line_country).records) == 9
+
+
+def test_ir_lines_unknown_block_region_bad_value_and_unknown_row() -> None:
+    blocks = [("ER", "XR", [("400 kV", "TEST ODD LINE", "1", 1.0, 1.0, 1.0, 0.5)], ()),
+              ("ER", "NR", [("400 kV", "TEST BAD LINE", "1", 1.0, 1.0, "n/a", 0.5, 0.5)], ("TEST BAD LINE",))]
+    result = parse_ir_lines(wb(ir_blocks=blocks))
+    odd = next(r.values for r in result.records if r.values["line_name"] == "TEST ODD LINE")
+    assert odd["from_region_code"] == "ER" and odd["to_region_code"] is None
+    assert len(result.failures) == 1 and "TEST BAD LINE" in result.failures[0].description
+
+
+def test_ir_lines_require_convention_and_sheet() -> None:
+    with pytest.raises(InvalidWorkbookError, match="sheet 'IR-Line' not found"):
+        parse_ir_lines(wb(omit_section="IR"))
+
+
+def test_international_reference_is_exact_names_only() -> None:
+    assert len(INTERNATIONAL_LINES) == 16 and set(INTERNATIONAL_LINES.values()) == {"BTN", "NPL", "BGD"}
+    assert set(COUNTRIES) == {"BTN", "NPL", "BGD", "MMR"}   # MMR: CrossBorder only (no lines)
+    assert line_country("132kV GELEPHU-SALAKATI") == "BTN"
+    assert line_country("  132kv   gelephu-salakati ") == "BTN"   # whitespace / case normalised only
+    assert line_country("132kV GELEPHU SALAKATI") is None          # no fuzzy or keyword matching
+    assert line_country("NEPAL EXPORT (FROM UP)") is None
+    assert line_country("BHERAMARA B/B HVDC (B'DESH)") == "BGD"
+
+
+def test_international_lines_countries_regions_labels_and_section_d() -> None:
+    result = parse_intl_lines(wb(), line_country=line_country)
+    assert not result.failures and len(result.records) == 9
+    assert result.sign_convention == "Import(+ve)/Export(-ve)"
+    by_line = {r.values["line_name"]: r for r in result.records}
+    godda = by_line["400kV GODDA_TPS-RAHANPUR (B'DESH) D/C"]
+    assert (godda.values["country_code"], godda.values["region_code"], godda.values["region_label"]) == (
+        "BGD", "ER", "ER (Isolated from Indian Grid)")
+    assert godda.raw["country_label"] == "BANGLADESH" and godda.raw["country_label_code"] == "BGD"
+    nepal_up = by_line["NEPAL IMPORT (FROM UP)"]
+    assert nepal_up.values["country_code"] == "NPL" and nepal_up.raw["country_label"] is None  # label on another row
+    bher = by_line["BHERAMARA B/B HVDC (B'DESH)"].values
+    assert (bher["max_mw"], bher["min_mw"], bher["avg_mw"], bher["energy_exchange_mu"]) == (
+        Decimal("-974.013"), Decimal("-954.017"), Decimal("-966.671"), Decimal("-23.2010"))  # signs kept
+    assert {label: total == published for label, total, published in result.section_d} == {
+        "BHUTAN": True, "NEPAL": True, "BANGLADESH": True, "GODDA -> BANGLADESH": True}
+    assert len(result.mw_not_reported) == 2   # Tala and Chukha receipt rows: MW 0, energy != 0
+
+
+def test_international_unknown_line_label_conflict_and_section_d_gap() -> None:
+    rows = list(INTL_ROWS)
+    rows[2] = ("", "NER", "132kV NEW BORDER LINE", -1.0, 0.0, -1.0, -0.5)        # not in the reference
+    rows[4] = ("BHUTAN", "NR", "132kV MAHENDRANAGAR-TANAKPUR(NHPC)", 68.761, 0.0, 61.013, 1.471)  # wrong label
+    result = parse_intl_lines(wb(intl_rows=rows, section_d_override={"Nepal": 99.0}), line_country=line_country)
+    unknown = next(r for r in result.records if r.values["line_name"] == "132kV NEW BORDER LINE")
+    assert unknown.values["country_code"] is None
+    conflict = next(r for r in result.records if r.values["line_name"].startswith("132kV MAHENDRANAGAR"))
+    assert conflict.values["country_code"] == "NPL" and conflict.raw["country_label_code"] == "BTN"
+    assert result.section_d == []  # not comparable while a line is unmapped
+    gap = parse_intl_lines(wb(section_d_override={"Nepal": 99.0}), line_country=line_country)
+    assert [label for label, t, p in gap.section_d if t != p] == ["NEPAL"]
+
+
+def test_international_requires_sign_convention() -> None:
+    with pytest.raises(InvalidWorkbookError, match="sign convention"):
+        parse_intl_lines(wb(intl_heading_convention=""), line_country=line_country)
+
+
+# --------------------------------------------------------------- CrossBorder
+
+from src.pipelines.grid_india.parse_psp import CROSSBORDER_FIRST_PUBLISHED, parse_crossborder  # noqa: E402
+
+GNA_CONTRACTS = {"GNA", "T_GNA_BILATERAL", "COLLECTIVE_IDAM", "COLLECTIVE_RTM"}
+
+
+def cb(day: date = D, **cb_kwargs):
+    return parse_crossborder(read_workbook(workbook_bytes(day, cb=cb_kwargs or None), expected_date=day))
+
+
+def _cb_value(result, direction: str, country: str, contract: str, exchange: str | None = None):
+    return next(r for r in result.records if (r.values["direction"], r.values["country_code"], r.values["contract_type"],
+                                              r.values["power_exchange"]) == (direction, country, contract, exchange))
+
+
+def test_crossborder_gna_layout_blocks_contracts_and_signs() -> None:
+    result = cb()
+    assert result.layout == "GNA" and not result.failures and not result.missing_values and not result.unknown_rows
+    assert len(result.records) == 96   # 3 blocks x 4 countries x 8 columns; TOTAL column and Total rows not records
+    assert {r.values["contract_type"] for r in result.records} == GNA_CONTRACTS
+    assert {r.values["country_code"] for r in result.records} == {"BTN", "NPL", "BGD", "MMR"}
+    assert {(r.values["contract_type"], r.values["power_exchange"]) for r in result.records
+            if r.values["contract_type"] in ("GNA", "T_GNA_BILATERAL")} == {("GNA", None), ("T_GNA_BILATERAL", None)}
+    assert {r.values["power_exchange"] for r in result.records if r.values["contract_type"].startswith("COLLECTIVE")} \
+        == {"IEX", "PXIL", "HPX"}
+    assert _cb_value(result, "EXPORT", "BGD", "GNA").values["scheduled_energy_mu"] == Decimal("24.4100")
+    assert _cb_value(result, "NET", "BGD", "GNA").values["scheduled_energy_mu"] == Decimal("-24.4060")  # signed Net
+    assert _cb_value(result, "IMPORT", "NPL", "COLLECTIVE_RTM", "IEX").values["scheduled_energy_mu"] == Decimal("10.5300")
+    conventions = {r.values["direction"]: r.values["sign_convention"] for r in result.records}
+    assert conventions["EXPORT"] == "Export From India (in MU)" and conventions["IMPORT"] == "Import by India(in MU)"
+    assert conventions["NET"] == "Net from India(in MU) -ve : Export / +ve : Import"
+    assert all(abs(s - p) <= Decimal("0.05") for _, s, p in result.totals + result.net_checks)
+    assert len(result.totals) == 3 * (5 + 9) and len(result.net_checks) == 5 * 9
+
+
+def test_crossborder_pre_gna_categories_keep_their_own_codes() -> None:
+    result = cb(date(2023, 8, 1), layout="PRE_GNA")
+    assert result.layout == "PRE_GNA" and len(result.records) == 96
+    assert {r.values["contract_type"] for r in result.records} == {
+        "ISGS_LTA_MTOA_PPA", "STOA_BILATERAL", "COLLECTIVE_IDAM", "COLLECTIVE_RTM"}   # never GNA / T-GNA
+
+
+def test_crossborder_absent_before_first_publication_required_after() -> None:
+    day = CROSSBORDER_FIRST_PUBLISHED - timedelta(days=1)
+    result = parse_crossborder(read_workbook(workbook_bytes(day), expected_date=day))
+    assert result.not_published and result.records == []
+    with pytest.raises(InvalidWorkbookError, match="sheet 'CrossBorder' not found"):
+        parse_crossborder(wb(omit_section="CB"))
+    with pytest.raises(InvalidWorkbookError, match="sheet 'CrossBorder' not found"):
+        parse_crossborder(read_workbook(workbook_bytes(CROSSBORDER_FIRST_PUBLISHED, with_cb=False),
+                                        expected_date=CROSSBORDER_FIRST_PUBLISHED))
+
+
+@pytest.mark.parametrize(("override", "message"), [
+    ({(3, 4): "DAM"}, "unknown column header"),               # IDAM renamed
+    ({(4, 5): "NSE"}, "unknown exchange"),                     # new exchange under IDAM
+    ({(1, 8): "TAM"}, "unrecognised header labels"),           # extra label above a column
+    ({(1, 3): "LTA"}, "unknown column header"),                # bilateral regime not T-GNA / STOA
+])
+def test_crossborder_unknown_headers_fail_the_section(override: dict, message: str) -> None:
+    with pytest.raises(InvalidWorkbookError, match=message):
+        cb(header_override=override)
+
+
+def test_crossborder_requires_net_sign_convention() -> None:
+    with pytest.raises(InvalidWorkbookError, match="sign convention"):
+        cb(net_heading="Net from India(in MU)")
+
+
+def test_crossborder_unknown_country_duplicate_missing_and_bad_cells() -> None:
+    unknown = cb(labels=("Bhutan", "Nepal", "Bangladesh", "Sri Lanka"))
+    assert {r.values["country_code"] for r in unknown.records if r.raw["country_label"] == "Sri Lanka"} == {None}
+    assert unknown.missing_countries == ["EXPORT|MYANMAR", "IMPORT|MYANMAR", "NET|MYANMAR"]
+    duplicate = cb(labels=("Bhutan", "Nepal", "Nepal", "Myanmar"))
+    assert {r.raw["duplicate"] for r in duplicate.records if r.values["country_code"] == "NPL"} == {True}
+    assert not any(r.raw["duplicate"] for r in duplicate.records if r.values["country_code"] != "NPL")
+    bad = cb(value_override={("EXPORT", "Bhutan", 4): "n/a", ("IMPORT", "Nepal", 7): ""})
+    assert [f.key for f in bad.failures] == [f"{D}|EXPORT|BHUTAN|COLLECTIVE_IDAM/IEX"]
+    assert len(bad.records) == 95
+    assert bad.missing_values == [f"{D}|IMPORT|NEPAL|COLLECTIVE_RTM/IEX"]
+    assert _cb_value(bad, "IMPORT", "NPL", "COLLECTIVE_RTM", "IEX").values["scheduled_energy_mu"] is None  # not derived
+
+
+def test_crossborder_reconciliation_values_kept_as_published() -> None:
+    def off(result, low=Decimal("0.05"), high=None):
+        return {what for what, s, p in result.totals + result.net_checks
+                if abs(s - p) > low and (high is None or abs(s - p) <= high)}
+
+    net = cb(net_override={("Nepal", 7): -9.0, ("Bhutan", 1): 0.83})
+    # Nepal RTM/IEX Net published -9.00 vs Import - Export 9.28 (and the totals that include it)
+    assert off(net) == {"NEPAL COLLECTIVE_RTM/IEX", "NEPAL TOTAL", "TOTAL COLLECTIVE_RTM/IEX", "TOTAL TOTAL"}
+    assert _cb_value(net, "NET", "NPL", "COLLECTIVE_RTM", "IEX").values["scheduled_energy_mu"] == Decimal("-9.0000")
+    # Bhutan GNA 0.83 vs 0.81: a rounding-sized 0.02 difference, within tolerance
+    assert off(net, Decimal("0"), Decimal("0.05")) == {"BHUTAN GNA", "BHUTAN TOTAL", "TOTAL GNA"}
+    total = cb(total_override={("EXPORT", "Bhutan"): 9.99})
+    assert off(total) == {"EXPORT BHUTAN row TOTAL", "EXPORT Total row TOTAL", "BHUTAN TOTAL"}
+
+
+# ---------------------------------------------------------------- TimeSeries
+
+from src.pipelines.grid_india.parse_psp import TIMESERIES_FIRST_PUBLISHED, parse_timeseries  # noqa: E402
+
+
+def ts(day: date = D, **ts_kwargs):
+    return parse_timeseries(read_workbook(workbook_bytes(day, ts=ts_kwargs or None), expected_date=day))
+
+
+def _mark(result, hhmm: str):
+    return next(r.values for r in result.records if r.values["interval_start"].strftime("%H:%M") == hhmm)
+
+
+@pytest.mark.parametrize(("day", "layout", "storage_gen", "storage_demand"), [
+    (date(2025, 1, 10), "13_COLUMNS", False, False),
+    (date(2026, 5, 10), "15_COLUMNS", True, False),
+    (D, "16_COLUMNS", True, True),
+])
+def test_timeseries_layouts_marks_and_storage_columns(day: date, layout: str, storage_gen: bool,
+                                                      storage_demand: bool) -> None:
+    result = ts(day)
+    assert result.layout == layout and not result.failures and not result.missing_marks and not result.unknown_rows
+    assert len(result.records) == 96
+    starts = [r.values["interval_start"] for r in result.records]
+    assert starts[0] == datetime(day.year, day.month, day.day, 0, 0, tzinfo=IST)
+    assert starts[-1] == datetime(day.year, day.month, day.day, 23, 45, tzinfo=IST)
+    assert {r.values["region_code"] for r in result.records} == {None}      # All India
+    v = _mark(result, "12:30")
+    assert v["solar_generation_mw"] == Decimal("40000.000") and v["grid_frequency_hz"] == Decimal("49.9800")
+    assert (v["storage_generation_mw"] is not None) is storage_gen        # NULL when not published, never 0 (T4)
+    assert (v["storage_demand_mw"] is not None) is storage_demand
+    assert result.exchange_heading.startswith("NET")
+    assert not (result.net_demand_mismatches or result.total_mismatches or result.telemetry_suspect)
+
+
+@pytest.mark.parametrize("time_format", ["seconds", "fraction_text"])
+def test_timeseries_time_cell_variants(time_format: str) -> None:
+    day = date(2024, 11, 5)
+    plain, variant = ts(day), ts(day, time_format=time_format)
+    assert [r.values["interval_start"] for r in variant.records] == [r.values["interval_start"] for r in plain.records]
+
+
+def test_timeseries_absent_before_first_publication_required_after() -> None:
+    day = TIMESERIES_FIRST_PUBLISHED - timedelta(days=1)
+    assert parse_timeseries(read_workbook(workbook_bytes(day), expected_date=day)).not_published
+    with pytest.raises(InvalidWorkbookError, match="sheet 'TimeSeries' not found"):
+        parse_timeseries(wb(omit_section="TS"))
+
+
+def test_timeseries_unknown_header_and_exchange_sign_fail() -> None:
+    with pytest.raises(InvalidWorkbookError, match="unknown column header"):
+        ts(extra_header="COAL\n(MW)")
+    with pytest.raises(InvalidWorkbookError, match="import as positive"):
+        ts(exchange_heading="NET TRANSNATIONAL EXCHANGE\n(MW)\n(+ve) Export, (-ve) Import")
+
+
+def test_timeseries_gaps_duplicates_and_bad_cells() -> None:
+    missing = ts(drop_marks=(59,))
+    assert len(missing.records) == 95 and missing.missing_marks == ["14:45"]   # reported, not filled
+    empty = ts(empty=True)
+    assert empty.records == [] and empty.missing_marks == [] and not empty.not_published
+    dup = ts(duplicate_mark=10)
+    assert [r.raw.get("duplicate") for r in dup.records if r.values["interval_start"].strftime("%H:%M") == "02:30"] \
+        == [True, True]
+    bad = ts(value_override={(3, "WIND"): "n/a", (4, "GAS"): ""})
+    assert [f.key for f in bad.failures] == [f"{D}|00:45"] and len(bad.records) == 95
+    assert bad.missing_values == [f"{D}|01:00|gas_generation_mw"] and _mark(bad, "01:00")["gas_generation_mw"] is None
+
+
+def test_timeseries_checks_keep_published_values() -> None:
+    result = ts(value_override={(40, "TOTAL GENERATION"): 1.0, (41, "NET DEMAND MET"): 5.0, (42, "FREQUENCY"): 0.0,
+                                (50, "SOLAR"): -63.0})
+    # 12:30 too: its solar cell was overridden without changing the published total / net demand
+    assert [m for m, _, _ in result.total_mismatches] == ["10:00", "12:30"]
+    assert [m for m, _, _ in result.net_demand_mismatches] == ["10:15", "12:30"]
+    assert result.telemetry_suspect == [("10:30", "frequency 0.0000 Hz outside 49-51 Hz")]
+    assert _mark(result, "10:00")["total_generation_mw"] == Decimal("1.000")      # stored as published
+    assert _mark(result, "12:30")["solar_generation_mw"] == Decimal("-63.000")    # negative kept, not rejected
+    zeros = {(43, n): 0.0 for n in ("NUCLEAR", "WIND", "SOLAR", "HYDRO", "GAS", "THERMAL", "STORAGE", "OTHERS")}
+    dead = ts(value_override=zeros)
+    assert any(m == "10:45" and "every generation source is 0" in reason for m, reason in dead.telemetry_suspect)
+
+
+def test_timeseries_total_excluding_storage_is_recognised() -> None:
+    result = ts(date(2026, 5, 10), total_excludes_storage=True)
+    assert len(result.total_excludes_storage) == 72 and result.total_mismatches == []   # storage 0 at 24 marks

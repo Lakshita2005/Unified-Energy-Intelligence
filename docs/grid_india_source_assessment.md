@@ -20,7 +20,7 @@ The one usable Grid-India source is NLDC's **Daily PSP report**. Its Excel workb
 | 2 | Fuel-wise generation | Daily PSP §G (daily MU by fuel and region); `TimeSeries` (15-min MW, all-India) | XLS | §G from 2023 (XLS); 15-min from 2024-11 | ✅ |
 | 3 | State-wise demand and availability | Daily PSP §C (+ `MOP_E1` §J bulk consumers) | XLS | from 2023-01 (XLS) | ✅ |
 | 4 | Generating unit outages | Daily PSP §F only: **aggregate MW by sector × region**. No unit-level public file from NLDC | XLS | from 2023-01 | ⚠️ aggregate only; unit level comes from CEA DGR (already loaded) |
-| 5 | Inter-regional exchange | Daily PSP §E (by region), `IR-Line` (by line), §D / `CrossBorder` (international) | XLS | `IR-Line` 2023-01; `CrossBorder` by 2024-10 | ✅ |
+| 5 | Inter-regional exchange | Daily PSP §E (by region), `IR-Line` (by line), §D / `CrossBorder` (international) | XLS | `IR-Line` 2023-01; `CrossBorder` from 2023-07-06 (corrected by the CrossBorder audit) | ✅ |
 | 6 | 15-minute SCADA | Daily PSP `TimeSeries`: **all-India** 15-min instantaneous frequency, demand and generation by source | XLS | from 2024-11-02..08 | ✅ all-India only; ❓ regional SCADA not found |
 
 **Key changes against what was known:**
@@ -90,9 +90,9 @@ From `IEX_Price_Forecasting` (read-only, not modified):
 | Report date | Sheets |
 |---|---|
 | 2023-01-15 | `MOP_E`, `IR-Line` |
-| 2024-10-15 | + `CrossBorder` |
+| 2023-07-06 | + `CrossBorder` (first report date with the sheet; categories STOA / (ISGS/LTA/MTOA) PPA until 2023-09-30, GNA / T-GNA from 2023-10-01) |
 | 2024-11-01 | `MOP_E`, `IR-Line`, `CrossBorder` (no `TimeSeries` yet) |
-| 2024-11-08 | + `TimeSeries` (13 columns) |
+| 2024-11-04 | + `TimeSeries` (13 columns; first report date with the sheet, corrected by the TimeSeries audit) |
 | 2026-11-12 | `MOP_E`, `MOP_E1`, `IR-Line`, `CrossBorder`, `TimeSeries` (16 columns, with storage) |
 
 Section letters and labels in `MOP_E` are the same in 2023 and 2026, but row positions shift. The parser must therefore locate sections and rows by label, as the CEA parsers do.

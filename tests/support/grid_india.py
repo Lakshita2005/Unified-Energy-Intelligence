@@ -21,6 +21,7 @@ import xlwt
 API = "https://gi.test/api/v1"
 CDN = "https://cdn.gi.test"
 REGIONS = ("NR", "WR", "SR", "ER", "NER")
+CB_FIRST_PUBLISHED = date(2023, 7, 6)
 
 # Section A: label -> regional values (TOTAL is the sum unless overridden)
 SECTION_A = [
@@ -98,8 +99,21 @@ def workbook_bytes(report_date: date, *, section_a: list | None = None, section_
                    section_g: list[tuple[str, list[Any]]] | None = None, g_all_india_override: dict[str, float] | None = None,
                    g_total_override: dict[str, float] | None = None, coal_scale: float = 1.0,
                    g_padding_rows: int = 0, section_f: list[tuple[str, list[Any]]] | None = None,
-                   f_total_override: dict[str, float] | None = None) -> bytes:
-    """A Daily PSP workbook for operating day ``report_date`` (Date of Reporting = D+1)."""
+                   f_total_override: dict[str, float] | None = None,
+                   section_e: list[tuple[str, list[Any]]] | None = None,
+                   e_total_override: dict[str, float] | None = None, e_heading: str | None = None,
+                   ir_blocks: list | None = None, intl_rows: list | None = None,
+                   ir_subtotal_override: dict[str, tuple[float, float, float]] | None = None,
+                   section_d_override: dict[str, float] | None = None,
+                   intl_heading_convention: str = "Import(+ve)/Export(-ve)",
+                   cb: dict[str, Any] | None = None, with_cb: bool | None = None,
+                   ts: dict[str, Any] | None = None, with_ts: bool | None = None) -> bytes:
+    """A Daily PSP workbook for operating day ``report_date`` (Date of Reporting = D+1).
+
+    The CrossBorder sheet is included from 2023-07-06 (as published) unless ``with_cb`` says otherwise or
+    ``omit_section="CB"``; ``cb`` holds keyword arguments for :func:`crossborder_rows`. Likewise TimeSeries from
+    2024-11-04 (``with_ts``, ``omit_section="TS"``, ``ts`` for :func:`timeseries_rows`).
+    """
     section_a = SECTION_A if section_a is None else section_a
     reporting = report_date + timedelta(days=1)
     rows: list[list[Any]] = [[""], [""], [""],
@@ -125,9 +139,11 @@ def workbook_bytes(report_date: date, *, section_a: list | None = None, section_
         rows += _area_rows(section_c if section_c is not None else default_section_c())
     rows.append([""])
     rows.append(["D. Transnational Exchanges (MU) - Import(+ve)/Export(-ve)"])
-    rows.append(["", "", "Bhutan", "Nepal", "Bangladesh"])
-    rows.append(["E. Import/Export by Regions (in MU) - Import(+ve)/Export(-ve); OD(+)/UD(-)"])
-    rows.append(["", "", *REGIONS, "TOTAL"])
+    actuals = {**section_d_actuals(intl_rows), **(section_d_override or {})}
+    rows.append(["", "", *actuals.keys()])
+    rows.append(["Actual (MU)", "", *actuals.values()])
+    if omit_section != "E":
+        rows += _section_e_rows(section_e, e_total_override or {}, e_heading or E_HEADING)
     if omit_section != "F":
         rows += _section_f_rows(section_f, f_total_override or {})
     rows += [[""]] * g_padding_rows  # shifts section G down, as different years do
@@ -143,10 +159,277 @@ def workbook_bytes(report_date: date, *, section_a: list | None = None, section_
         j_rows += _area_rows(section_j if section_j is not None else default_section_j())
         j_rows += [[""], ["Executive Director-NLDC"]]
         _write(book.add_sheet("MOP_E1"), j_rows)
-    _write(book.add_sheet("IR-Line"), [["INTER-REGIONAL EXCHANGES"]])
+    if omit_section != "IR":
+        _write(book.add_sheet("IR-Line"), ir_line_rows(report_date, blocks=ir_blocks, intl_rows=intl_rows,
+                                                       subtotal_override=ir_subtotal_override,
+                                                       intl_heading_convention=intl_heading_convention))
+    if with_cb is None:
+        with_cb = report_date >= CB_FIRST_PUBLISHED
+    if with_cb and omit_section != "CB":
+        _write(book.add_sheet("CrossBorder"), crossborder_rows(report_date, **(cb or {})))
+    if with_ts is None:
+        with_ts = report_date >= TS_FIRST_PUBLISHED
+    if with_ts and omit_section != "TS":
+        _write(book.add_sheet("TimeSeries"), timeseries_rows(report_date, **(ts or {})))
     buffer = io.BytesIO()
     book.save(buffer)
     return buffer.getvalue()
+
+
+# IR-Line, inter-regional part: (from, to, [(voltage, line, circuits, max import MW, max export MW, import MU,
+# export MU[, published NET override])], lines left out of the published subtotal). Synthetic values.
+IR_BLOCKS = [
+    ("ER", "NR", [("765 kV", "TEST GAYA-VARANASI", "2", 357.013, 1339.017, 0.013, 17.217),
+                  ("HVDC", "TEST PUSAULI B/B", "-", 0.0, 47.011, 0.0, 2.451)], ()),
+    ("ER", "SR", [("HVDC", "TEST TALCHER-KOLAR BIPOLE", "2", 0.0, 1500.019, 0.0, 36.751),
+                  ("400 kV", "TEST TALCHER-I/C", "2", 0.0, 210.023, 0.0, 5.031),
+                  ("400 kV", "TEST ANGUL-SRIKAKULAM", "4", 0.0, 2000.029, 0.0, 47.233)], ("TEST TALCHER-I/C",)),
+    ("WR", "NR", [("765 kV", "TEST GWALIOR-AGRA", "2", 1200.031, 0.0, 25.537, 0.0)], ()),
+]
+# IR-Line, international part: (State label, Region cell, line name, Max MW, Min MW, Avg MW, energy MU).
+# As in the real sheet, the country label is printed on one row of each group only. Line names are real
+# published names (the country reference is keyed on them); the values are synthetic.
+INTL_ROWS = [
+    ("", "ER", "400kV TALA-BINAGURI 1,2 ,400kV MALBASE - BINAGURI & 400kV NORBUGANG - BINAGURI i.e. BINAGURI "
+               "RECEIPT (from TALA HEP 6*170MW)", 0.0, 0.0, 0.0, 0.421),
+    ("BHUTAN", "ER", "220kV CHUKHA-BIRPARA 1&2 (& 220kV MALBASE - BIRPARA) i.e. BIRPARA RECEIPT (from CHUKHA HEP "
+                     "4*84MW)", 0.0, 0.0, 0.0, -3.661),
+    ("", "NER", "132kV GELEPHU-SALAKATI", -74.013, 0.0, -58.751, -1.411),
+    ("", "NR", "NEPAL IMPORT (FROM UP)", 12.017, 0.0, 9.013, 0.217),
+    ("NEPAL", "NR", "132kV MAHENDRANAGAR-TANAKPUR(NHPC)", 68.761, 0.0, 61.013, 1.471),
+    ("", "ER", "400kV DHALKEBAR-MUZAFFARPUR 1&2", 606.013, 476.017, 532.917, 12.793),
+    ("", "ER", "BHERAMARA B/B HVDC (B'DESH)", -974.013, -954.017, -966.671, -23.201),
+    ("BANGLADESH", "ER\n(Isolated from Indian Grid)", "400kV GODDA_TPS-RAHANPUR (B'DESH) D/C", -947.013, 0.0,
+     -863.333, -20.721),
+    ("", "NER", "132kV COMILLA-SURAJMANI NAGAR 1&2", -101.013, 0.0, -86.667, -2.081),
+]
+COUNTRY_OF_LABEL = {"BHUTAN": ("BHUTAN", 0, 3), "NEPAL": ("NEPAL", 3, 6), "BANGLADESH": ("BANGLADESH", 6, 9)}
+
+
+def section_d_actuals(intl_rows: list | None = None) -> dict[str, float]:
+    """Section D 'Actual (MU)' consistent with the default international rows (Godda reported separately)."""
+    rows = INTL_ROWS if intl_rows is None else intl_rows
+    out = {"Bhutan": 0.0, "Nepal": 0.0, "Bangladesh": 0.0, "Godda -> Bangladesh": 0.0}
+    groups = [("Bhutan", 0, 3), ("Nepal", 3, 6), ("Bangladesh", 6, 9)]
+    for name, lo, hi in groups:
+        for row in rows[lo:hi]:
+            key = "Godda -> Bangladesh" if "Isolated" in row[1] else name
+            out[key] = round(out[key] + row[6], 4)
+    return out
+
+
+def ir_line_rows(report_date: date, *, blocks: list | None = None, intl_rows: list | None = None,
+                 subtotal_override: dict[str, tuple[float, float, float]] | None = None,
+                 intl_heading_convention: str = "Import(+ve)/Export(-ve)",
+                 net_convention: str = "Import=(+ve) /Export =(-ve) for NET (MU)") -> list[list[Any]]:
+    blocks = IR_BLOCKS if blocks is None else blocks
+    intl_rows = INTL_ROWS if intl_rows is None else intl_rows
+    reporting = report_date + timedelta(days=1)
+    rows: list[list[Any]] = [
+        ["INTER-REGIONAL EXCHANGES"], [net_convention],
+        ["", "", "", "", "", "", "Date of Reporting:", "", "", reporting.strftime("%d-%b-%Y")],
+        ["Sl No", "Voltage Level", "Line Details", "No. of Circuit", "Max Import (MW)", "Max Export (MW)",
+         "Import (MU)", "Export (MU)", "", "NET (MU)"],
+    ]
+    for frm, to, lines, excluded in blocks:
+        rows.append([f"Import/Export of {frm} (With {to})"])
+        totals = [0.0, 0.0, 0.0]
+        for n, line in enumerate(lines, start=1):
+            voltage, name, circuits, max_imp, max_exp, imp, exp = line[:7]
+            net = line[7] if len(line) > 7 else round(imp - exp, 4)
+            rows.append([float(n), voltage, name, circuits, max_imp, max_exp, imp, exp, "", net])
+            if name not in excluded:
+                totals = [round(totals[0] + imp, 4), round(totals[1] + exp, 4), round(totals[2] + net, 4)]
+        label = f"{frm}-{to}"
+        imp_t, exp_t, net_t = (subtotal_override or {}).get(label, tuple(totals))
+        rows.append([label, "", "", "", "", "", imp_t, exp_t, "", net_t])
+    rows.append([""])
+    rows.append(["INTERNATIONAL EXCHANGES", "", "", "", "", "", "", "", intl_heading_convention])
+    rows.append(["State", "", "Region", "Line Name", "", "Max (MW)", "Min (MW)", "Avg (MW)", "", "Energy Exchange (MU)"])
+    for label, region, name, mx, mn, avg, energy in intl_rows:
+        rows.append([label, "", region, name, "", mx, mn, avg, "", energy])
+    return rows
+
+
+# Section E: (row label, regional MU values NR..NER). Schedules balance to 0 across regions, as published.
+# O/D/U/D is published rounded independently of Actual - Schedule (by up to ~0.013 MU), as in the real reports.
+# Synthetic values with odd decimals, so they never coincide with real rows loaded for the same day.
+SECTION_E = [
+    ("Schedule(MU)", [121.483, -237.497, 274.141, -162.401, 4.274]),
+    ("Actual(MU)", [125.307, -235.941, 275.003, -184.593, 2.817]),
+    ("O/D/U/D(MU)", [3.82, 1.55, 0.86, -22.2, -1.46]),
+]
+E_HEADING = "E. Import/Export by Regions (in MU) - Import(+ve)/Export(-ve); OD(+)/UD(-)"
+
+
+# CrossBorder sheet (from report date 2023-07-06). Synthetic values, 2 decimals. Component order per row:
+# GNA (or pre-2023-10 PPA), T-GNA (or STOA) bilateral, IDAM IEX/PXIL/HPX, RTM IEX/PXIL/HPX -> columns below.
+CB_COMPONENT_COLUMNS = (1, 3, 4, 5, 6, 7, 9, 10)
+CB_TOTAL_COLUMN = 12
+CB_COUNTRIES = ("Bhutan", "Nepal", "Bangladesh", "Myanmar")
+# Every synthetic value has 3 decimals (published values have at most 2) and none is 0, so the fixture can never
+# coincide with rows already loaded in the database the integration tests run against.
+CB_ROWS: dict[str, dict[str, list[float]]] = {
+    "EXPORT": {"Bhutan": [0.001, 0.31, 2.07, 0.002, 0.003, 0.004, 0.005, 0.006],
+               "Nepal": [0.007, 0.008, 0.009, 0.011, 0.012, 1.25, 0.013, 0.014],
+               "Bangladesh": [24.41, 0.07, 0.015, 0.016, 0.017, 0.018, 0.019, 0.021],
+               "Myanmar": [0.022, 0.023, 0.024, 0.025, 0.026, 0.027, 0.028, 0.029]},
+    "IMPORT": {"Bhutan": [0.81, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036, 0.037],
+               "Nepal": [0.89, 0.05, 0.038, 0.039, 0.041, 10.53, 0.042, 0.043],
+               "Bangladesh": [0.004, 0.044, 0.045, 0.046, 0.047, 0.048, 0.049, 0.051],
+               "Myanmar": [0.052, 0.053, 0.054, 0.055, 0.056, 0.057, 0.058, 0.059]},
+}
+CB_HEADINGS = {"EXPORT": "Export From India (in MU)", "IMPORT": "Import by India(in MU)",
+               "NET": "Net from India(in MU)" + " " * 60 + "-ve : Export / +ve : Import"}
+
+
+def crossborder_rows(report_date: date, *, layout: str = "GNA", rows: dict | None = None,
+                     labels: tuple[str, ...] = CB_COUNTRIES, net_override: dict[tuple[str, int], float] | None = None,
+                     total_override: dict[tuple[str, str], float] | None = None,
+                     header_override: dict[tuple[int, int], str] | None = None,
+                     net_heading: str | None = None, value_override: dict[tuple[str, str, int], Any] | None = None
+                     ) -> list[list[Any]]:
+    """The CrossBorder sheet as rows. ``labels`` are the printed country names (rows reuse CB_ROWS by position).
+
+    Overrides: ``net_override[(country, column)]`` published Net cell; ``total_override[(block, country|'Total')]``
+    published row TOTAL; ``header_override[(row offset in block 1..4, column)]`` header text (all blocks);
+    ``value_override[(block, country, column)]`` any cell value (e.g. '' or 'n/a').
+    """
+    rows = CB_ROWS if rows is None else rows
+    width = 13
+    out: list[list[Any]] = [[""] * width for _ in range(1)]
+    out[0][2] = "CROSS BORDER EXCHANGE SCHEDULE"
+    out[0][8] = "Date of Reporting:"
+    out[0][11] = (report_date + timedelta(days=1)).strftime("%d-%b-%Y")
+    for block in ("EXPORT", "IMPORT", "NET"):
+        header = [[""] * width for _ in range(4)]
+        if layout == "GNA":
+            header[0][3], header[1][1] = "T-GNA", "GNA"
+            header[2][1] = "(ISGA/PPA)" if block == "IMPORT" else "(ISGS/PPA)"
+        else:
+            header[0][3], header[1][1], header[2][1] = "STOA", "(ISGS/LTA/MTOA)", "PPA"
+        header[1][4] = "COLLECTIVE"
+        header[2][0], header[2][3], header[2][4], header[2][7], header[2][12] = "Country", "BILATERAL", "IDAM", "RTM", "TOTAL"
+        for c, text in zip((3, 4, 5, 6, 7, 9, 10), ("TOTAL", "IEX", "PXIL", "HPX", "IEX", "PXIL", "HPX")):
+            header[3][c] = text
+        for (offset, c), text in (header_override or {}).items():
+            header[offset - 1][c] = text
+        heading = net_heading if (block == "NET" and net_heading is not None) else CB_HEADINGS[block]
+        out.append([heading] + [""] * (width - 1))
+        out += header
+        totals = [0.0] * 8
+        for position, label in enumerate(labels):
+            base = CB_COUNTRIES[min(position, len(CB_COUNTRIES) - 1)]
+            if block == "NET":
+                values = [round(i - e, 3) for i, e in zip(rows["IMPORT"][base], rows["EXPORT"][base])]
+                for col_index, col in enumerate(CB_COMPONENT_COLUMNS):
+                    if (label, col) in (net_override or {}):
+                        values[col_index] = net_override[(label, col)]
+            else:
+                values = list(rows[block][base])
+            row = [""] * width
+            row[0] = label
+            for col, v in zip(CB_COMPONENT_COLUMNS, values):
+                row[col] = v
+            row[CB_TOTAL_COLUMN] = (total_override or {}).get((block, label), round(sum(values), 3))
+            for col in CB_COMPONENT_COLUMNS + (CB_TOTAL_COLUMN,):
+                if (block, label, col) in (value_override or {}):
+                    row[col] = value_override[(block, label, col)]
+            totals = [round(t + v, 3) for t, v in zip(totals, values)]
+            out.append(row)
+        total_row = [""] * width
+        total_row[0] = {"EXPORT": "Total Export", "IMPORT": "Total Import", "NET": "Total Net"}[block]
+        for col, v in zip(CB_COMPONENT_COLUMNS, totals):
+            total_row[col] = v
+        total_row[CB_TOTAL_COLUMN] = (total_override or {}).get((block, "Total"), round(sum(totals), 3))
+        out.append(total_row)
+        out.append([""] * width)
+    return out[:-1]
+
+
+# TimeSeries sheet (from report date 2024-11-04). Synthetic values. Layouts as published: 13 columns, 15 (+ storage
+# generation, 2026-05-06..31) and 16 (+ storage demand, from 2026-06-01).
+TS_FIRST_PUBLISHED = date(2024, 11, 4)
+TS_EXCHANGE_HEADINGS = {"13": "NET TRANSNATIONAL EXCHANGE\n(MW)\n(+ve) Import, (-ve) Export",
+                        "15": "NET TRANSNATIONAL EXCHANGE\n(MW)\n(+ve) Import, (-ve) Export",
+                        "16": "NET \nTRANSNATIONAL\nEXCHANGE\n(MW)\n+ve Imp,-ve Exp"}
+
+
+def ts_layout_for(report_date: date) -> str:
+    return "13" if report_date < date(2026, 5, 6) else "15" if report_date < date(2026, 6, 1) else "16"
+
+
+def ts_values(index: int) -> dict[str, float]:
+    """Synthetic, internally consistent values for mark ``index`` (0 = 0:00 ... 95 = 23:45)."""
+    v = {"FREQUENCY": round(50.0 + ((index % 5) - 2) * 0.01, 2), "NUCLEAR": 6500.0, "WIND": 5000.0 + 10 * index,
+         "SOLAR": float(max(0, 40000 - abs(index - 50) * 1600)), "HYDRO": 10000.0 + 20 * index, "GAS": 1800.0,
+         "THERMAL": 140000.0 - 100 * (index % 7), "OTHERS": 1400.0, "STORAGE": 300.0 if index % 4 else 0.0,
+         "STORAGE DEMAND": 250.0 if index < 24 else 0.0, "EXCHANGE": -100.0 + index}
+    return v
+
+
+def timeseries_rows(report_date: date, *, layout: str | None = None, time_format: str = "text",
+                    drop_marks: tuple[int, ...] = (), empty: bool = False,
+                    value_override: dict[tuple[int, str], Any] | None = None,
+                    total_excludes_storage: bool = False, exchange_heading: str | None = None,
+                    extra_header: str | None = None, duplicate_mark: int | None = None) -> list[list[Any]]:
+    """The TimeSeries sheet as rows. ``value_override[(index, NAME)]`` replaces a published cell (NAME as in
+    :func:`ts_values` or 'DEMAND MET' / 'NET DEMAND MET' / 'TOTAL GENERATION'); ``time_format`` is 'text' ('0:15'),
+    'seconds' ('0:15:00') or 'fraction_text' ('0.010416...' as text, as on 2024-11-05)."""
+    layout = layout or ts_layout_for(report_date)
+    names = ["TIME", "FREQUENCY", "DEMAND MET"] + (["STORAGE DEMAND"] if layout == "16" else []) + \
+        ["NUCLEAR", "WIND", "SOLAR", "HYDRO", "GAS", "THERMAL"] + (["STORAGE"] if layout in ("15", "16") else []) + \
+        ["OTHERS", "NET DEMAND MET", "TOTAL GENERATION"]
+    labels = {"TIME": "TIME", "FREQUENCY": "FREQUENCY\n(Hz)", "DEMAND MET": "DEMAND\nMET¹\n(MW)",
+              "STORAGE DEMAND": "STORAGE\nDEMAND\n(PSP&BESS)\n(MW)", "HYDRO": "HYDRO²\n(MW)",
+              "STORAGE": "STORAGE\n(PSP&BESS)\n(MW)", "OTHERS": "OTHERS³\n(MW)"}
+    width = len(names) + (2 if layout != "13" else 1)
+    exchange_col = width - 1
+    header = [labels.get(n, f"{n}\n(MW)") for n in names] + [""] * (width - len(names))
+    header[exchange_col] = exchange_heading if exchange_heading is not None else TS_EXCHANGE_HEADINGS[layout]
+    if extra_header:
+        header.insert(len(names), extra_header)
+        header = header[:width + 1]
+    formula = [""] * width
+    for c in range(2, len(names)):
+        formula[c] = f"({chr(ord('A') + c - 2)})"
+    formula[exchange_col] = f"({chr(ord('A') + len(names) - 2)})"
+    title = [""] * width
+    title[0] = "Date of Reporting:"
+    title[width - 2] = (report_date + timedelta(days=1)).strftime("%d-%b-%Y")
+    rows: list[list[Any]] = [title, ["15 Min (INSTANTANEOUS) ALL INDIA GRID FREQUENCY, GENERATION & DEMAND MET "
+                                     "(SCADA DATA)"], header, formula]
+    marks = [] if empty else [i for i in range(96) if i not in drop_marks]
+    if duplicate_mark is not None:
+        marks.insert(marks.index(duplicate_mark) + 1, duplicate_mark)
+    for i in marks:
+        v = ts_values(i)
+        sources = ["NUCLEAR", "WIND", "SOLAR", "HYDRO", "GAS", "THERMAL", "OTHERS"] + \
+            (["STORAGE"] if layout in ("15", "16") and not total_excludes_storage else [])
+        total = sum(v[s] for s in sources)
+        demand = total + v["EXCHANGE"] - 2500.0 + (v["STORAGE DEMAND"] if layout == "16" else 0.0)
+        v.update({"DEMAND MET": demand, "NET DEMAND MET": demand - v["WIND"] - v["SOLAR"], "TOTAL GENERATION": total})
+        for (index, name), value in (value_override or {}).items():
+            if index == i:
+                v[name] = value
+        h, m = divmod(i * 15, 60)
+        stamp = {"text": f"{h}:{m:02d}", "seconds": f"{h}:{m:02d}:00", "fraction_text": repr(i / 96)}[time_format]
+        row = [stamp] + [v[n] for n in names[1:]] + [""] * (width - len(names))
+        row[exchange_col] = v["EXCHANGE"]
+        rows.append(row)
+    rows.append(["¹Demand Met (Demand incidental on transmission system): synthetic footnote text for tests. "
+                 "Disclaimer: synthetic."])
+    return rows
+
+
+def _section_e_rows(section_e: list | None, total_override: dict[str, float], heading: str) -> list[list[Any]]:
+    rows_in = SECTION_E if section_e is None else section_e
+    numeric = lambda v: v if isinstance(v, (int, float)) else 0.0  # noqa: E731
+    rows: list[list[Any]] = [[heading], ["", "", *REGIONS, "TOTAL"]]
+    for label, values in rows_in:
+        rows.append([label, "", *values, total_override.get(label, round(sum(numeric(v) for v in values), 4))])
+    rows.append([""])
+    return rows
 
 
 # Section F: (sector label, regional outage MW NR..NER). TOTAL column and Total row are computed sums.

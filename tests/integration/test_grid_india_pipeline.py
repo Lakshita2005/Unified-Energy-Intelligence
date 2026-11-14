@@ -26,6 +26,7 @@ from src.common.http_client import HttpClient
 from src.common.raw_storage import LocalFileSystemBackend, RawStorageManager
 from src.ingestion.models import RunStatus
 from src.pipelines.grid_india.api import IST
+from src.pipelines.grid_india.reference import seed_countries
 from src.pipelines.grid_india.runner import PspRunSummary, run_grid_india_psp
 from tests.support.grid_india import API, CDN, AreaRow, FileSpec, MockGridIndia, default_section_c, workbook_bytes
 
@@ -34,7 +35,8 @@ pytestmark = pytest.mark.integration
 D = date(2026, 11, 10)
 TODAY = date(2026, 11, 13)
 TABLES = ("grid_daily_power_supply", "grid_state_power_supply", "grid_sourcewise_generation",
-          "grid_generation_outage")
+          "grid_generation_outage", "grid_regional_exchange", "grid_interregional_line_exchange",
+          "grid_international_line_exchange", "grid_crossborder_market_schedule", "grid_15min_scada")
 
 
 @pytest.fixture(scope="module")
@@ -53,6 +55,7 @@ def conn(manager: DatabaseManager) -> Iterator[Connection]:
         outer = connection.begin()
         for table in TABLES:
             connection.info[table] = connection.execute(text(f"SELECT coalesce(max(id), 0) FROM pi.{table}")).scalar()
+        seed_countries(connection, "pi")  # country reference rows, rolled back with the test
         try:
             yield connection
         finally:
@@ -240,8 +243,8 @@ def test_missing_days_are_recorded_in_each_section(conn: Connection, settings: S
     assert summary.missing == ["2026-11-09", "2026-11-11", "2026-11-12"]
     for section in summary.sections.values():
         assert section.status is RunStatus.SUCCESS
-        assert _issues(conn, section.result.ingestion_run_id) == [
-            ("MISSING_DAY", "INFO"), ("MISSING_DAY", "WARNING"), ("MISSING_DAY", "WARNING")]
+        missing_day_issues = [i for i in _issues(conn, section.result.ingestion_run_id) if i[0] == "MISSING_DAY"]
+        assert missing_day_issues == [("MISSING_DAY", "INFO"), ("MISSING_DAY", "WARNING"), ("MISSING_DAY", "WARNING")]
 
 
 def test_unmapped_area_is_rejected_and_recorded(conn: Connection, settings: Settings,
@@ -491,3 +494,508 @@ def test_section_f_rerun_revision_and_reprocess(conn: Connection, settings: Sett
     reprocessed = _run(conn, settings, storage, mock, reprocess=True).sections["outage"].result
     assert (reprocessed.records_inserted, reprocessed.records_unchanged) == (0, 20)
     assert len(_rows(conn, OUTAGE)) == 11
+
+
+# ------------------------------------------------------------------ section E
+
+from tests.support.grid_india import SECTION_E  # noqa: E402
+
+EXCHANGE = "grid_regional_exchange"
+
+
+def test_section_e_end_to_end_with_document_and_checksum_linkage(conn: Connection, settings: Settings,
+                                                                  storage: RawStorageManager) -> None:
+    mock = MockGridIndia([FileSpec(D, workbook_bytes(D))])
+
+    summary = _run(conn, settings, storage, mock)
+
+    exchange = summary.sections["exchange"]
+    assert summary.ok and exchange.status is RunStatus.SUCCESS and exchange.result.records_inserted == 5
+    assert len(mock.downloads) == 1 and len(_workbook_files(settings)) == 1
+    rows = {r.region_code: r for r in _rows(conn, EXCHANGE)}
+    assert set(rows) == {"NR", "WR", "SR", "ER", "NER"}
+    er = rows["ER"]
+    assert (er.scheduled_exchange_mu, er.actual_exchange_mu, er.od_ud_mu) == (
+        Decimal("-162.4010"), Decimal("-184.5930"), Decimal("-22.2000"))
+    assert er.exchange_direction is None and er.sign_convention == "Import(+ve)/Export(-ve); OD(+)/UD(-)"
+    assert rows["NR"].scheduled_exchange_mu == Decimal("121.4830")  # import positive, as published
+    published = datetime(2026, 11, 11, 10, 40, tzinfo=IST)
+    assert {(r.availability_basis, r.source_published_at, r.source_available_at) for r in rows.values()} == {
+        ("PUBLISHED", published, published)}
+    doc = conn.execute(text("SELECT s.dataset_code, d.checksum_sha256, d.ingestion_run_id FROM pi.source_document d "
+                            "JOIN pi.source_dataset s USING (dataset_id) WHERE d.document_id = :d"),
+                       {"d": er.document_id}).one()
+    assert doc.dataset_code == "GRID_INDIA_EXCHANGE" and doc.ingestion_run_id == exchange.result.ingestion_run_id
+    assert doc.checksum_sha256 == sha256_bytes(_workbook_files(settings)[0].read_bytes())
+    assert _issues(conn, exchange.result.ingestion_run_id) == []
+
+
+def test_section_e_availability_around_cutoff(conn: Connection, settings: Settings,
+                                              storage: RawStorageManager) -> None:
+    before, after = date(2025, 5, 11), date(2025, 5, 12)
+    mock = MockGridIndia([FileSpec(before, workbook_bytes(before), datetime(2025, 4, 15, 9, 10)),
+                          FileSpec(after, workbook_bytes(after), datetime(2025, 5, 13, 17, 12))])
+    assert _run(conn, settings, storage, mock, start=before, end=after).ok
+    assert {(r.report_date, r.availability_basis, r.source_published_at, r.source_available_at)
+            for r in _rows(conn, EXCHANGE)} == {
+        (before, "ESTIMATED_D_PLUS_2_0900", None, datetime(2025, 5, 13, 9, 0, tzinfo=IST)),
+        (after, "PUBLISHED", datetime(2025, 5, 13, 17, 12, tzinfo=IST), datetime(2025, 5, 13, 17, 12, tzinfo=IST))}
+
+
+def test_missing_section_e_fails_only_the_exchange_section(conn: Connection, settings: Settings,
+                                                           storage: RawStorageManager) -> None:
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D, omit_section="E"))]))
+    assert summary.sections["exchange"].status is RunStatus.FAILED
+    assert "section E not found" in summary.sections["exchange"].error
+    assert all(summary.sections[s].status is RunStatus.SUCCESS for s in ("supply", "states", "fuel", "outage"))
+    assert _rows(conn, EXCHANGE) == []
+
+
+def test_section_e_invalid_value_unknown_row_and_discrepancies(conn: Connection, settings: Settings,
+                                                              storage: RawStorageManager) -> None:
+    rows = [SECTION_E[0], ("Actual(MU)", [125.307, -235.941, 275.003, "n/a", 2.817]),
+            ("O/D/U/D(MU)", [3.82, 1.55, 0.86, -22.2, -9.0]), ("Net Transfer(MU)", [1, 1, 1, 1, 1])]
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D, section_e=rows))]))
+    exchange = summary.sections["exchange"]
+    assert exchange.status is RunStatus.PARTIAL
+    assert (exchange.result.records_inserted, exchange.result.records_rejected) == (4, 1)
+    issues = _issues(conn, exchange.result.ingestion_run_id)
+    assert ("PARSE_ERROR", "ERROR") in issues and ("UNKNOWN_LABEL", "WARNING") in issues
+    assert ("OD_UD_MISMATCH", "WARNING") in issues  # NER: published -9.0 vs Actual - Schedule
+
+    day = date(2026, 11, 9)
+    second = _run(conn, settings, storage,
+                  MockGridIndia([FileSpec(day, workbook_bytes(day, e_total_override={"Schedule(MU)": 5.0}))]),
+                  start=day).sections["exchange"]
+    assert second.status is RunStatus.SUCCESS
+    # the TOTAL mismatch, and the TOTAL O/D/U/D no longer equal to Actual - Schedule
+    assert _issues(conn, second.result.ingestion_run_id) == [("OD_UD_MISMATCH", "WARNING"), ("TOTAL_MISMATCH", "WARNING")]
+
+
+def test_section_e_rerun_revision_and_reprocess(conn: Connection, settings: Settings,
+                                                storage: RawStorageManager) -> None:
+    revised_rows = [SECTION_E[0], ("Actual(MU)", [125.307, -235.941, 275.003, -190.593, 2.817]),
+                    ("O/D/U/D(MU)", [3.82, 1.55, 0.86, -28.19, -1.46])]  # ER revised
+    original = FileSpec(D, workbook_bytes(D), datetime(2026, 11, 11, 10, 47), suffix="269")
+    revised = FileSpec(D, workbook_bytes(D, section_e=revised_rows), datetime(2026, 11, 11, 16, 38), suffix="269_611")
+    mock = MockGridIndia([original, revised])
+
+    first = _run(conn, settings, storage, mock).sections["exchange"].result
+    assert (first.records_inserted, first.records_unchanged) == (6, 4)
+    er = [r for r in _rows(conn, EXCHANGE) if r.region_code == "ER"]
+    assert [(r.actual_exchange_mu, r.od_ud_mu) for r in er] == [(Decimal("-184.5930"), Decimal("-22.2000")),
+                                                                 (Decimal("-190.5930"), Decimal("-28.1900"))]
+    assert [r.source_available_at.astimezone(IST).time() for r in er] == [time(10, 47), time(16, 38)]
+
+    rerun = _run(conn, settings, storage, mock).sections["exchange"].result
+    assert (rerun.duplicate_documents, rerun.records_inserted) == (2, 0)
+    reprocessed = _run(conn, settings, storage, mock, reprocess=True).sections["exchange"].result
+    assert (reprocessed.records_inserted, reprocessed.records_unchanged) == (0, 10)
+    assert len(_rows(conn, EXCHANGE)) == 6
+
+
+# ------------------------------------------------------------------ IR-Line
+
+from tests.support.grid_india import INTL_ROWS, IR_BLOCKS  # noqa: E402
+
+IR = "grid_interregional_line_exchange"
+INTL = "grid_international_line_exchange"
+
+
+def _doc(conn: Connection, document_id: int) -> Any:
+    return conn.execute(text("SELECT s.dataset_code, d.checksum_sha256, d.ingestion_run_id FROM pi.source_document d "
+                             "JOIN pi.source_dataset s USING (dataset_id) WHERE d.document_id = :d"),
+                        {"d": document_id}).one()
+
+
+def test_ir_lines_end_to_end(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    mock = MockGridIndia([FileSpec(D, workbook_bytes(D))])
+
+    summary = _run(conn, settings, storage, mock)
+
+    ir, intl = summary.sections["ir_lines"], summary.sections["intl_lines"]
+    assert summary.ok and ir.status is RunStatus.SUCCESS and intl.status is RunStatus.SUCCESS
+    assert ir.result.ingestion_run_id != intl.result.ingestion_run_id
+    assert (ir.result.records_inserted, intl.result.records_inserted) == (6, 9)
+    assert len(mock.downloads) == 1 and len(_workbook_files(settings)) == 1
+    checksum = sha256_bytes(_workbook_files(settings)[0].read_bytes())
+    published = datetime(2026, 11, 11, 10, 40, tzinfo=IST)
+
+    lines = {r.line_name: r for r in _rows(conn, IR)}
+    gaya = lines["TEST GAYA-VARANASI"]
+    assert (gaya.from_region_code, gaya.to_region_code, gaya.voltage_level, gaya.circuits, gaya.import_mu,
+            gaya.export_mu, gaya.net_exchange_mu) == ("ER", "NR", "765 kV", "2", Decimal("0.0130"),
+                                                      Decimal("17.2170"), Decimal("-17.2040"))
+    assert gaya.direction_convention == "Import=(+ve) /Export =(-ve) for NET (MU)" and lines["TEST PUSAULI B/B"].circuits is None
+    doc = _doc(conn, gaya.document_id)
+    assert (doc.dataset_code, doc.checksum_sha256, doc.ingestion_run_id) == (
+        "GRID_INDIA_PSP_IR_LINES", checksum, ir.result.ingestion_run_id)
+    assert {(r.availability_basis, r.source_published_at) for r in lines.values()} == {("PUBLISHED", published)}
+    assert _issues(conn, ir.result.ingestion_run_id) == [("SUBTOTAL_EXCLUDES_LINE", "INFO")]
+
+    intl_rows = {r.line_name: r for r in _rows(conn, INTL)}
+    godda = intl_rows["400kV GODDA_TPS-RAHANPUR (B'DESH) D/C"]
+    assert (godda.country_code, godda.region_code, godda.region_label, godda.energy_exchange_mu, godda.direction,
+            godda.sign_convention) == ("BGD", "ER", "ER (Isolated from Indian Grid)", Decimal("-20.7210"), None,
+                                       "Import(+ve)/Export(-ve)")
+    assert {r.country_code for r in intl_rows.values()} == {"BTN", "NPL", "BGD"}
+    doc = _doc(conn, godda.document_id)
+    assert (doc.dataset_code, doc.checksum_sha256, doc.ingestion_run_id) == (
+        "GRID_INDIA_PSP_INTL_LINES", checksum, intl.result.ingestion_run_id)
+    assert _issues(conn, intl.result.ingestion_run_id) == [("MW_NOT_REPORTED", "INFO")] * 2
+
+
+def test_ir_lines_availability_around_cutoff(conn: Connection, settings: Settings,
+                                             storage: RawStorageManager) -> None:
+    before, after = date(2025, 5, 11), date(2025, 5, 12)
+    mock = MockGridIndia([FileSpec(before, workbook_bytes(before), datetime(2025, 4, 15, 9, 10)),
+                          FileSpec(after, workbook_bytes(after), datetime(2025, 5, 13, 17, 12))])
+    assert _run(conn, settings, storage, mock, start=before, end=after).ok
+    expected = {(before, "ESTIMATED_D_PLUS_2_0900", None, datetime(2025, 5, 13, 9, 0, tzinfo=IST)),
+                (after, "PUBLISHED", datetime(2025, 5, 13, 17, 12, tzinfo=IST), datetime(2025, 5, 13, 17, 12, tzinfo=IST))}
+    for table in (IR, INTL):
+        assert {(r.report_date, r.availability_basis, r.source_published_at, r.source_available_at)
+                for r in _rows(conn, table)} == expected
+
+
+def test_missing_ir_line_sheet_fails_only_the_ir_sections(conn: Connection, settings: Settings,
+                                                          storage: RawStorageManager) -> None:
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D, omit_section="IR"))]))
+    for name in ("ir_lines", "intl_lines"):
+        assert summary.sections[name].status is RunStatus.FAILED and "IR-Line" in summary.sections[name].error
+    assert all(summary.sections[s].status is RunStatus.SUCCESS for s in ("supply", "states", "fuel", "outage", "exchange"))
+    assert _rows(conn, IR) == [] and _rows(conn, INTL) == []
+
+
+def test_unknown_international_line_and_label_conflict_are_rejected(conn: Connection, settings: Settings,
+                                                                    storage: RawStorageManager) -> None:
+    rows = list(INTL_ROWS)
+    rows[2] = ("", "NER", "132kV NEW BORDER LINE", -1.0, 0.0, -1.0, -0.5)
+    rows[4] = ("BHUTAN", "NR", "132kV MAHENDRANAGAR-TANAKPUR(NHPC)", 68.761, 0.0, 61.013, 1.471)
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D, intl_rows=rows))]))
+    intl = summary.sections["intl_lines"]
+    assert intl.status is RunStatus.PARTIAL and (intl.result.records_inserted, intl.result.records_rejected) == (7, 2)
+    issues = _issues(conn, intl.result.ingestion_run_id)
+    assert ("UNMAPPED_COUNTRY", "ERROR") in issues and ("COUNTRY_LABEL_CONFLICT", "ERROR") in issues
+    assert not any(r.line_name == "132kV NEW BORDER LINE" for r in _rows(conn, INTL))
+
+
+def test_ir_reconciliation_warnings(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    blocks = [IR_BLOCKS[0], IR_BLOCKS[1],
+              ("WR", "NR", [("765 kV", "TEST GWALIOR-AGRA", "2", 1200.031, 0.0, 25.537, 0.0, 20.0)], ())]  # NET off
+    workbook = workbook_bytes(D, ir_blocks=blocks, ir_subtotal_override={"ER-NR": (1.0, 2.0, -1.0)},
+                              section_d_override={"Nepal": 99.0})
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook)]))
+    ir, intl = summary.sections["ir_lines"], summary.sections["intl_lines"]
+    assert ir.status is RunStatus.SUCCESS and intl.status is RunStatus.SUCCESS
+    ir_issues = _issues(conn, ir.result.ingestion_run_id)
+    assert ("NET_MISMATCH", "WARNING") in ir_issues and ("TOTAL_MISMATCH", "WARNING") in ir_issues
+    assert ("SECTION_D_MISMATCH", "WARNING") in _issues(conn, intl.result.ingestion_run_id)
+    gwalior = next(r for r in _rows(conn, IR) if r.line_name == "TEST GWALIOR-AGRA")
+    assert gwalior.net_exchange_mu == Decimal("20.0000")  # published value kept
+
+
+def test_runs_require_country_reference_outside_dry_runs(conn: Connection, settings: Settings,
+                                                         storage: RawStorageManager,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.pipelines.grid_india.runner.missing_countries", lambda *a, **k: ["BTN"])
+    with pytest.raises(ConfigurationError, match="Country reference rows missing"):
+        _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D))]))
+    # Sections that do not need countries still run.
+    assert _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D))]), sections=["ir_lines"]).ok
+
+
+def test_ir_lines_rerun_revision_and_reprocess(conn: Connection, settings: Settings,
+                                               storage: RawStorageManager) -> None:
+    revised_blocks = [("ER", "NR", [("765 kV", "TEST GAYA-VARANASI", "2", 357.013, 1339.017, 0.013, 19.217),
+                                    IR_BLOCKS[0][2][1]], ()), IR_BLOCKS[1], IR_BLOCKS[2]]
+    revised_intl = list(INTL_ROWS)
+    revised_intl[5] = ("", "ER", "400kV DHALKEBAR-MUZAFFARPUR 1&2", 606.013, 476.017, 532.917, 13.793)
+    original = FileSpec(D, workbook_bytes(D), datetime(2026, 11, 11, 10, 47), suffix="269")
+    revised = FileSpec(D, workbook_bytes(D, ir_blocks=revised_blocks, intl_rows=revised_intl,
+                                         section_d_override={"Nepal": 15.481}),
+                       datetime(2026, 11, 11, 16, 38), suffix="269_611")
+    mock = MockGridIndia([original, revised])
+
+    first = _run(conn, settings, storage, mock)
+    ir, intl = first.sections["ir_lines"].result, first.sections["intl_lines"].result
+    assert (ir.records_inserted, ir.records_unchanged) == (7, 5)
+    assert (intl.records_inserted, intl.records_unchanged) == (10, 8)
+    gaya = [r for r in _rows(conn, IR) if r.line_name == "TEST GAYA-VARANASI"]
+    assert [(r.export_mu, r.source_available_at.astimezone(IST).time()) for r in gaya] == [
+        (Decimal("17.2170"), time(10, 47)), (Decimal("19.2170"), time(16, 38))]
+
+    rerun = _run(conn, settings, storage, mock)
+    assert all(rerun.sections[s].result.records_inserted == 0 for s in ("ir_lines", "intl_lines"))
+    reprocessed = _run(conn, settings, storage, mock, reprocess=True)
+    assert (reprocessed.sections["ir_lines"].result.records_inserted,
+            reprocessed.sections["intl_lines"].result.records_inserted) == (0, 0)
+    assert (len(_rows(conn, IR)), len(_rows(conn, INTL))) == (7, 10)
+
+
+def test_reference_cli_seeds_countries_idempotently(settings: Settings, conn: Connection) -> None:
+    from src.pipelines.grid_india.reference import missing_countries, seed_countries as seed
+    assert missing_countries(conn, "pi") == []          # seeded by the fixture (rolled back)
+    again = seed(conn, "pi")
+    assert again.inserted == [] and sorted(again.unchanged) == ["BGD", "BTN", "MMR", "NPL"]
+
+
+# --------------------------------------------------------------- CrossBorder
+
+CB = "grid_crossborder_market_schedule"
+
+
+def _cb_row(rows: list[Any], direction: str, country: str, contract: str, exchange: str | None = None) -> Any:
+    return next(r for r in rows if (r.direction, r.country_code, r.contract_type, r.power_exchange)
+                == (direction, country, contract, exchange))
+
+
+def test_crossborder_end_to_end(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    mock = MockGridIndia([FileSpec(D, workbook_bytes(D))])
+
+    summary = _run(conn, settings, storage, mock, sections=["crossborder"])
+
+    section = summary.sections["crossborder"]
+    assert summary.ok and section.status is RunStatus.SUCCESS
+    assert (section.result.records_read, section.result.records_inserted, section.result.records_rejected) == (96, 96, 0)
+    rows = _rows(conn, CB)
+    assert len(rows) == 96 and {r.direction for r in rows} == {"EXPORT", "IMPORT", "NET"}
+    assert {r.country_code for r in rows} == {"BTN", "NPL", "BGD", "MMR"}
+    gna = _cb_row(rows, "EXPORT", "BGD", "GNA")
+    assert (gna.scheduled_energy_mu, gna.power_exchange, gna.sign_convention, gna.interconnector_id) == (
+        Decimal("24.4100"), None, "Export From India (in MU)", None)
+    net = _cb_row(rows, "NET", "BGD", "GNA")
+    assert (net.scheduled_energy_mu, net.sign_convention) == (
+        Decimal("-24.4060"), "Net from India(in MU) -ve : Export / +ve : Import")
+    assert _cb_row(rows, "IMPORT", "NPL", "COLLECTIVE_RTM", "IEX").scheduled_energy_mu == Decimal("10.5300")
+    assert all(r.scheduled_energy_mu > 0 for r in rows if r.direction != "NET")
+    checksum = sha256_bytes(_workbook_files(settings)[0].read_bytes())
+    doc = _doc(conn, gna.document_id)
+    assert (doc.dataset_code, doc.checksum_sha256, doc.ingestion_run_id) == (
+        "GRID_INDIA_PSP_CROSSBORDER", checksum, section.result.ingestion_run_id)
+    assert {r.ingestion_run_id for r in rows} == {section.result.ingestion_run_id}
+    assert {(r.availability_basis, r.source_published_at) for r in rows} == {
+        ("PUBLISHED", datetime(2026, 11, 11, 10, 40, tzinfo=IST))}
+    assert _issues(conn, section.result.ingestion_run_id) == []
+
+
+def test_crossborder_pre_gna_layout_loads_its_own_contract_codes(conn: Connection, settings: Settings,
+                                                                 storage: RawStorageManager) -> None:
+    day = date(2023, 8, 1)
+    mock = MockGridIndia([FileSpec(day, workbook_bytes(day, cb={"layout": "PRE_GNA"}), datetime(2025, 4, 15, 9, 9))])
+    summary = _run(conn, settings, storage, mock, start=day, sections=["crossborder"])
+    assert summary.ok
+    rows = _rows(conn, CB)
+    assert {r.contract_type for r in rows} == {"ISGS_LTA_MTOA_PPA", "STOA_BILATERAL", "COLLECTIVE_IDAM", "COLLECTIVE_RTM"}
+    assert {(r.availability_basis, r.source_published_at) for r in rows} == {("ESTIMATED_D_PLUS_2_0900", None)}
+
+
+def test_crossborder_availability_around_cutoff(conn: Connection, settings: Settings,
+                                                storage: RawStorageManager) -> None:
+    before, after = date(2025, 5, 11), date(2025, 5, 12)
+    mock = MockGridIndia([FileSpec(before, workbook_bytes(before), datetime(2025, 4, 15, 9, 10)),
+                          FileSpec(after, workbook_bytes(after), datetime(2025, 5, 13, 17, 12))])
+    assert _run(conn, settings, storage, mock, start=before, end=after, sections=["crossborder"]).ok
+    assert {(r.report_date, r.availability_basis, r.source_published_at, r.source_available_at)
+            for r in _rows(conn, CB)} == {
+        (before, "ESTIMATED_D_PLUS_2_0900", None, datetime(2025, 5, 13, 9, 0, tzinfo=IST)),
+        (after, "PUBLISHED", datetime(2025, 5, 13, 17, 12, tzinfo=IST), datetime(2025, 5, 13, 17, 12, tzinfo=IST))}
+
+
+def test_crossborder_not_yet_published_is_info_and_missing_sheet_fails(conn: Connection, settings: Settings,
+                                                                     storage: RawStorageManager) -> None:
+    early = date(2023, 7, 5)
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(early, workbook_bytes(early))]), start=early,
+                   sections=["crossborder"])
+    section = summary.sections["crossborder"]
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 0
+    assert _issues(conn, section.result.ingestion_run_id) == [("SECTION_NOT_PUBLISHED", "INFO")]
+
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D, omit_section="CB"))]))
+    assert summary.sections["crossborder"].status is RunStatus.FAILED
+    assert "CrossBorder" in summary.sections["crossborder"].error
+    assert all(summary.sections[s].status is RunStatus.SUCCESS for s in summary.sections if s != "crossborder")
+    assert _rows(conn, CB) == []
+
+
+def test_crossborder_unknown_country_rejected_with_warnings(conn: Connection, settings: Settings,
+                                                            storage: RawStorageManager) -> None:
+    workbook = workbook_bytes(D, cb={"labels": ("Bhutan", "Nepal", "Bangladesh", "Sri Lanka")})
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook)]), sections=["crossborder"])
+    section = summary.sections["crossborder"]
+    assert section.status is RunStatus.PARTIAL
+    assert (section.result.records_inserted, section.result.records_rejected) == (72, 24)
+    issues = _issues(conn, section.result.ingestion_run_id)
+    assert issues.count(("UNMAPPED_COUNTRY", "ERROR")) == 24 and issues.count(("MISSING_COUNTRY", "WARNING")) == 3
+    assert "MMR" not in {r.country_code for r in _rows(conn, CB)}
+
+
+def test_crossborder_reconciliation_warnings_keep_published_values(conn: Connection, settings: Settings,
+                                                                   storage: RawStorageManager) -> None:
+    workbook = workbook_bytes(D, cb={"net_override": {("Nepal", 7): -9.003, ("Bhutan", 1): 0.833},
+                                     "total_override": {("EXPORT", "Bhutan"): 9.99}})
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook)]), sections=["crossborder"])
+    section = summary.sections["crossborder"]
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 96
+    issues = _issues(conn, section.result.ingestion_run_id)
+    assert set(issues) == {("NET_MISMATCH", "WARNING"), ("TOTAL_MISMATCH", "WARNING")}
+    assert _cb_row(_rows(conn, CB), "NET", "NPL", "COLLECTIVE_RTM", "IEX").scheduled_energy_mu == Decimal("-9.0030")
+    assert _cb_row(_rows(conn, CB), "NET", "BTN", "GNA").scheduled_energy_mu == Decimal("0.8330")  # 0.024: no issue
+    descriptions = [r[0] for r in conn.execute(text(
+        "SELECT issue_description FROM pi.data_quality_issue WHERE ingestion_run_id = :r AND issue_code = 'NET_MISMATCH'"),
+        {"r": section.result.ingestion_run_id})]
+    assert not any("BHUTAN GNA" in d for d in descriptions)
+
+
+def test_crossborder_rerun_revision_and_reprocess(conn: Connection, settings: Settings,
+                                                  storage: RawStorageManager) -> None:
+    from tests.support.grid_india import CB_ROWS
+    revised_rows = {block: {country: list(values) for country, values in rows.items()} for block, rows in CB_ROWS.items()}
+    revised_rows["EXPORT"]["Bangladesh"][0] = 25.13   # GNA export revised -> Export and Net rows change
+    original = FileSpec(D, workbook_bytes(D), datetime(2026, 11, 11, 10, 47), suffix="269")
+    revised = FileSpec(D, workbook_bytes(D, cb={"rows": revised_rows}), datetime(2026, 11, 11, 16, 38), suffix="269_611")
+    mock = MockGridIndia([original, revised])
+
+    first = _run(conn, settings, storage, mock, sections=["crossborder"]).sections["crossborder"].result
+    assert (first.records_inserted, first.records_unchanged) == (98, 94)
+    versions = [(r.direction, r.scheduled_energy_mu, r.source_available_at.astimezone(IST).time())
+                for r in _rows(conn, CB) if (r.country_code, r.contract_type) == ("BGD", "GNA")
+                and r.direction != "IMPORT"]
+    assert versions == [("EXPORT", Decimal("24.4100"), time(10, 47)), ("NET", Decimal("-24.4060"), time(10, 47)),
+                        ("EXPORT", Decimal("25.1300"), time(16, 38)), ("NET", Decimal("-25.1260"), time(16, 38))]
+    assert _run(conn, settings, storage, mock, sections=["crossborder"]).sections["crossborder"].result.records_inserted == 0
+    reprocessed = _run(conn, settings, storage, mock, sections=["crossborder"], reprocess=True)
+    assert reprocessed.sections["crossborder"].result.records_inserted == 0
+    assert len(_rows(conn, CB)) == 98
+
+
+def test_crossborder_requires_country_reference_outside_dry_runs(conn: Connection, settings: Settings,
+                                                                 storage: RawStorageManager,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.pipelines.grid_india.runner.missing_countries", lambda *a, **k: ["MMR"])
+    with pytest.raises(ConfigurationError, match="Country reference rows missing"):
+        _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D))]), sections=["crossborder"])
+
+
+# ---------------------------------------------------------------- TimeSeries
+
+TS = "grid_15min_scada"
+
+
+def _ts_run(conn: Connection, settings: Settings, storage: RawStorageManager, day: date, workbook: bytes,
+            created: datetime | None = None, **kwargs: Any) -> Any:
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(day, workbook, created)]), start=day,
+                   sections=["timeseries"], **kwargs)
+    return summary.sections["timeseries"]
+
+
+def test_timeseries_end_to_end(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    section = _ts_run(conn, settings, storage, D, workbook_bytes(D))
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 96
+    rows = _rows(conn, TS, order="interval_start")
+    assert len(rows) == 96 and {r.region_code for r in rows} == {None}
+    assert rows[0].interval_start == datetime(2026, 11, 10, 0, 0, tzinfo=IST)
+    assert rows[-1].interval_start == datetime(2026, 11, 10, 23, 45, tzinfo=IST)
+    noon = next(r for r in rows if r.interval_start == datetime(2026, 11, 10, 12, 30, tzinfo=IST))
+    assert (noon.solar_generation_mw, noon.storage_demand_mw, noon.net_transnational_exchange_mw) == (
+        Decimal("40000.000"), Decimal("0.000"), Decimal("-50.000"))
+    doc = _doc(conn, noon.document_id)
+    assert (doc.dataset_code, doc.checksum_sha256, doc.ingestion_run_id) == (
+        "GRID_INDIA_SCADA", sha256_bytes(_workbook_files(settings)[0].read_bytes()), section.result.ingestion_run_id)
+    assert {(r.availability_basis, r.source_published_at) for r in rows} == {
+        ("PUBLISHED", datetime(2026, 11, 11, 10, 40, tzinfo=IST))}
+    assert _issues(conn, section.result.ingestion_run_id) == []
+
+
+def test_timeseries_older_layouts_leave_unpublished_storage_null(conn: Connection, settings: Settings,
+                                                                 storage: RawStorageManager) -> None:
+    old, mid = date(2025, 1, 10), date(2026, 5, 10)
+    assert _ts_run(conn, settings, storage, old, workbook_bytes(old), datetime(2025, 4, 15, 9, 9)).status \
+        is RunStatus.SUCCESS
+    assert _ts_run(conn, settings, storage, mid, workbook_bytes(mid), datetime(2026, 5, 11, 10, 5)).status \
+        is RunStatus.SUCCESS
+    rows = _rows(conn, TS, order="interval_start")
+    by_day = {d: [r for r in rows if r.interval_start.astimezone(IST).date() == d] for d in (old, mid)}
+    assert all(r.storage_generation_mw is None and r.storage_demand_mw is None for r in by_day[old])
+    assert all(r.storage_generation_mw is not None and r.storage_demand_mw is None for r in by_day[mid])
+    assert {(r.availability_basis, r.source_published_at) for r in by_day[old]} == {("ESTIMATED_D_PLUS_2_0900", None)}
+    assert {r.source_available_at for r in by_day[old]} == {datetime(2025, 1, 12, 9, 0, tzinfo=IST)}
+
+
+def test_timeseries_absent_empty_and_missing_sheet(conn: Connection, settings: Settings,
+                                                   storage: RawStorageManager) -> None:
+    early = date(2024, 11, 3)
+    section = _ts_run(conn, settings, storage, early, workbook_bytes(early))
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 0
+    assert _issues(conn, section.result.ingestion_run_id) == [("SECTION_NOT_PUBLISHED", "INFO")]
+
+    empty = date(2025, 7, 15)
+    section = _ts_run(conn, settings, storage, empty, workbook_bytes(empty, ts={"empty": True}))
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 0
+    assert _issues(conn, section.result.ingestion_run_id) == [("NO_INTERVAL_DATA", "WARNING")]
+
+    summary = _run(conn, settings, storage, MockGridIndia([FileSpec(D, workbook_bytes(D, omit_section="TS"))]))
+    assert summary.sections["timeseries"].status is RunStatus.FAILED
+    assert all(summary.sections[s].status is RunStatus.SUCCESS for s in summary.sections if s != "timeseries")
+    assert _rows(conn, TS) == []
+
+
+def test_timeseries_warnings_keep_published_values(conn: Connection, settings: Settings,
+                                                   storage: RawStorageManager) -> None:
+    overrides = {(40, "TOTAL GENERATION"): 1.0, (41, "NET DEMAND MET"): 5.0, (42, "FREQUENCY"): 0.0,
+                 (44, "DEMAND MET"): 300000.0}
+    section = _ts_run(conn, settings, storage, D, workbook_bytes(D, ts={"value_override": overrides,
+                                                                         "drop_marks": (59,)}))
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 95
+    issues = _issues(conn, section.result.ingestion_run_id)
+    for expected in [("MISSING_INTERVAL", "WARNING"), ("TOTAL_MISMATCH", "WARNING"), ("NET_DEMAND_MISMATCH", "WARNING"),
+                     ("TELEMETRY_SUSPECT", "WARNING"), ("MAX_DEMAND_ABOVE_SECTION_A", "WARNING")]:
+        assert expected in issues
+    rows = {r.interval_start.astimezone(IST).strftime("%H:%M"): r for r in _rows(conn, TS)}
+    assert "14:45" not in rows                                            # never filled
+    assert rows["10:30"].grid_frequency_hz == Decimal("0.0000")           # stored as published (T3)
+    assert rows["11:00"].demand_met_mw == Decimal("300000.000")
+
+
+def test_timeseries_total_excluding_storage_is_info(conn: Connection, settings: Settings,
+                                                    storage: RawStorageManager) -> None:
+    day = date(2026, 5, 10)
+    section = _ts_run(conn, settings, storage, day, workbook_bytes(day, ts={"total_excludes_storage": True}),
+                      datetime(2026, 5, 11, 10, 5))
+    assert section.status is RunStatus.SUCCESS and section.result.records_inserted == 96
+    assert _issues(conn, section.result.ingestion_run_id) == [("TOTAL_EXCLUDES_STORAGE", "INFO")]
+
+
+def test_timeseries_duplicate_mark_rejected(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    section = _ts_run(conn, settings, storage, D, workbook_bytes(D, ts={"duplicate_mark": 10}))
+    assert section.status is RunStatus.PARTIAL
+    assert (section.result.records_inserted, section.result.records_rejected) == (95, 2)
+    assert _issues(conn, section.result.ingestion_run_id).count(("DUPLICATE_INTERVAL", "ERROR")) == 2
+
+
+def test_timeseries_availability_around_cutoff(conn: Connection, settings: Settings,
+                                               storage: RawStorageManager) -> None:
+    before, after = date(2025, 5, 11), date(2025, 5, 12)
+    mock = MockGridIndia([FileSpec(before, workbook_bytes(before), datetime(2025, 4, 15, 9, 10)),
+                          FileSpec(after, workbook_bytes(after), datetime(2025, 5, 13, 17, 12))])
+    assert _run(conn, settings, storage, mock, start=before, end=after, sections=["timeseries"]).ok
+    assert {(r.interval_start.astimezone(IST).date(), r.availability_basis, r.source_published_at, r.source_available_at)
+            for r in _rows(conn, TS)} == {
+        (before, "ESTIMATED_D_PLUS_2_0900", None, datetime(2025, 5, 13, 9, 0, tzinfo=IST)),
+        (after, "PUBLISHED", datetime(2025, 5, 13, 17, 12, tzinfo=IST), datetime(2025, 5, 13, 17, 12, tzinfo=IST))}
+
+
+def test_timeseries_rerun_revision_and_reprocess(conn: Connection, settings: Settings,
+                                                 storage: RawStorageManager) -> None:
+    original = FileSpec(D, workbook_bytes(D), datetime(2026, 11, 11, 10, 47), suffix="269")
+    revised = FileSpec(D, workbook_bytes(D, ts={"value_override": {(72, "WIND"): 9999.0}}),
+                       datetime(2026, 11, 11, 16, 38), suffix="269_611")
+    mock = MockGridIndia([original, revised])
+    first = _run(conn, settings, storage, mock, sections=["timeseries"]).sections["timeseries"].result
+    assert (first.records_inserted, first.records_unchanged) == (97, 95)
+    at_18 = [r for r in _rows(conn, TS) if r.interval_start == datetime(2026, 11, 10, 18, 0, tzinfo=IST)]
+    assert [(r.wind_generation_mw, r.source_available_at.astimezone(IST).time()) for r in at_18] == [
+        (Decimal("5720.000"), time(10, 47)), (Decimal("9999.000"), time(16, 38))]
+    assert _run(conn, settings, storage, mock, sections=["timeseries"]).sections["timeseries"].result.records_inserted == 0
+    again = _run(conn, settings, storage, mock, sections=["timeseries"], reprocess=True).sections["timeseries"].result
+    assert again.records_inserted == 0 and len(_rows(conn, TS)) == 97

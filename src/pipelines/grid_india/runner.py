@@ -43,6 +43,7 @@ from src.ingestion.repositories import IngestionRepository
 from src.pipelines.cea.reference import missing_geography, seed_reference
 from src.pipelines.grid_india import api
 from src.pipelines.grid_india.pipeline import SECTION_PIPELINES, PreparedWorkbook
+from src.pipelines.grid_india.reference import missing_countries, seed_countries
 
 logger = get_logger(__name__)
 
@@ -176,6 +177,16 @@ def run_grid_india_psp(
             elif missing_ref:
                 raise ConfigurationError(f"Region/state reference rows missing ({len(missing_ref)}). "
                                          "Run: python -m scripts.ingest_cea reference")
+            # International lines and CrossBorder need the country reference rows
+            # (python -m scripts.ingest_grid_india reference).
+            if {"intl_lines", "crossborder"} & set(sections):
+                missing_country = missing_countries(connection, settings.db_schema)
+                if missing_country and dry_run:
+                    seed_countries(connection, settings.db_schema)
+                    summary.seeded_reference = True
+                elif missing_country:
+                    raise ConfigurationError(f"Country reference rows missing: {missing_country}. "
+                                             "Run: python -m scripts.ingest_grid_india reference")
 
         client = http_client or HttpClient(settings=settings)
         workbooks: list[PreparedWorkbook] = []

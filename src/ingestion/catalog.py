@@ -184,17 +184,31 @@ DATASETS: tuple[CatalogDataset, ...] = (
               "reported bulk consumers).",
     ),
     _dataset(
-        "GRID_INDIA", "GRID_INDIA_SCADA", "Grid-India SCADA regional operational data",
-        f"{PENDING}: SCADA data publication and access method not verified",
-        PENDING, PENDING, ("grid_15min_scada",),
-        notes="Destination table is designed for 15-minute intervals; the source's native interval is unconfirmed.",
+        # Was a pending placeholder (no runs or documents); now the Daily PSP 'TimeSeries' sheet (decision T1).
+        # Regional 15-minute SCADA was not found publicly; this is the all-India series only.
+        "GRID_INDIA", "GRID_INDIA_SCADA", "Grid-India (NLDC) Daily PSP report - TimeSeries (all-India 15-minute SCADA)",
+        "Same NLDC Daily PSP workbook as GRID_INDIA_PSP_DAILY (listing POST https://webapi.grid-india.in/api/v1/file, "
+        "file https://webcdn.grid-india.in/<FilePath>). Sheet 'TimeSeries', '15 Min (INSTANTANEOUS) ALL INDIA GRID "
+        "FREQUENCY, GENERATION & DEMAND MET (SCADA DATA)' (from report date 2024-11-04): frequency, demand met, "
+        "generation by source, storage (from 2026-05/06), net demand met, total generation and net transnational "
+        "exchange (import +ve) at each 15-minute mark 0:00-23:45.",
+        "15min", "daily", ("grid_15min_scada",),
+        notes="Instantaneous values at each mark (not averages; column comment, migration 0006). All-India only "
+              "(region_code NULL). Storage generation from 2026-05-06, storage demand from 2026-06-01 (NULL before). "
+              "Values stored as published, including telemetry-loss zeros (flagged).",
     ),
     _dataset(
-        "GRID_INDIA", "GRID_INDIA_EXCHANGE", "Grid-India regional, inter-regional and transnational exchange",
-        f"{PENDING}: report(s) and format not verified (may overlap PSP report section D)",
-        PENDING, PENDING,
-        ("grid_regional_exchange", "grid_interregional_line_exchange", "grid_international_line_exchange",
-         "grid_crossborder_market_schedule"),
+        # Was a pending placeholder (no runs or documents); now Section E only. IR-Line and CrossBorder will get
+        # their own datasets, since documents are de-duplicated per dataset.
+        "GRID_INDIA", "GRID_INDIA_EXCHANGE", "Grid-India (NLDC) Daily PSP report - Section E (regional exchange)",
+        "Same NLDC Daily PSP workbook as GRID_INDIA_PSP_DAILY (listing POST https://webapi.grid-india.in/api/v1/file, "
+        "file https://webcdn.grid-india.in/<FilePath>). Section E, sheet MOP_E, 'Import/Export by Regions (in MU) - "
+        "Import(+ve)/Export(-ve); OD(+)/UD(-)': Schedule, Actual and O/D/U/D per region (NR, WR, SR, ER, NER), "
+        "with TOTAL.",
+        "daily", "daily", ("grid_regional_exchange",),
+        notes="Signed MU values as published (import +ve, export -ve; over-drawal +ve, under-drawal -ve). The published "
+              "O/D/U/D is stored separately (od_ud_mu, migration 0003) because it is not always Actual - Schedule. "
+              "exchange_direction is left NULL; the TOTAL column is additive and validated, not stored.",
     ),
     _dataset(
         # Was a pending placeholder (no runs or documents); now Section G only. Section F (generation outage
@@ -207,6 +221,37 @@ DATASETS: tuple[CatalogDataset, ...] = (
         "daily", "daily", ("grid_sourcewise_generation",),
         notes="Gross generation in MU. One row per region x fuel; the All-India column and the Total row are "
               "additive and are validated, not stored. fuel_type is a normalised code, fuel_label the published label.",
+    ),
+    _dataset(
+        "GRID_INDIA", "GRID_INDIA_PSP_IR_LINES", "Grid-India (NLDC) Daily PSP report - IR-Line (inter-regional lines)",
+        "Same NLDC Daily PSP workbook as GRID_INDIA_PSP_DAILY (listing POST https://webapi.grid-india.in/api/v1/file, "
+        "file https://webcdn.grid-india.in/<FilePath>). Sheet 'IR-Line', 'INTER-REGIONAL EXCHANGES': per line in "
+        "blocks 'Import/Export of <region> (With <region>)': voltage level, circuits, max import/export (MW), "
+        "import/export (MU), NET (MU).",
+        "daily", "daily", ("grid_interregional_line_exchange",),
+        notes="from_region_code = the first-named region of the block; NET import +ve relative to it (sheet title). "
+              "Import/export are published as separate non-negative values. Block subtotal rows are validated, not "
+              "stored (the ER-SR subtotal excludes TALCHER-I/C).",
+    ),
+    _dataset(
+        "GRID_INDIA", "GRID_INDIA_PSP_INTL_LINES", "Grid-India (NLDC) Daily PSP report - IR-Line (international lines)",
+        "Same NLDC Daily PSP workbook as GRID_INDIA_PSP_DAILY (listing POST https://webapi.grid-india.in/api/v1/file, "
+        "file https://webcdn.grid-india.in/<FilePath>). Sheet 'IR-Line', 'INTERNATIONAL EXCHANGES' (Import(+ve)/"
+        "Export(-ve)): per line: country, region, max/min/avg (MW), energy exchange (MU).",
+        "daily", "daily", ("grid_international_line_exchange",),
+        notes="Country from an exact line-name reference (ISO alpha-3 BTN/NPL/BGD); the published Region cell is kept "
+              "in region_label (migration 0004). Totals per country are compared with Section D.",
+    ),
+    _dataset(
+        "GRID_INDIA", "GRID_INDIA_PSP_CROSSBORDER", "Grid-India (NLDC) Daily PSP report - CrossBorder (exchange schedule)",
+        "Same NLDC Daily PSP workbook as GRID_INDIA_PSP_DAILY (listing POST https://webapi.grid-india.in/api/v1/file, "
+        "file https://webcdn.grid-india.in/<FilePath>). Sheet 'CrossBorder', 'CROSS BORDER EXCHANGE SCHEDULE' (from "
+        "report date 2023-07-06): Export From India, Import by India and Net from India (-ve export / +ve import), "
+        "in MU, per country (Bhutan, Nepal, Bangladesh, Myanmar) and contract: GNA (ISGS/PPA), T-GNA Bilateral, "
+        "Collective IDAM and RTM per exchange (IEX, PXIL, HPX); before 2023-10-01 (ISGS/LTA/MTOA) PPA and STOA.",
+        "daily", "daily", ("grid_crossborder_market_schedule",),
+        notes="Scheduled energy. Net rows stored as direction NET (migration 0005); row TOTAL column and Total rows "
+              "validated, not stored. Pre-2023-10 contract categories keep their own codes.",
     ),
     _dataset(
         "GRID_INDIA", "GRID_INDIA_PSP_OUTAGE", "Grid-India (NLDC) Daily PSP report - Section F (generation outage)",

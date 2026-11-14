@@ -18,6 +18,11 @@ and never marks the other sections (or the workbook) as successful.
 | :class:`StatesPipeline` | C + J | grid_state_power_supply | area_code, report_date |
 | :class:`FuelPipeline` | G | grid_sourcewise_generation | region_code, fuel_type, report_date |
 | :class:`OutagePipeline` | F | grid_generation_outage | region_code, sector, report_date |
+| :class:`ExchangePipeline` | E | grid_regional_exchange | region_code, report_date |
+| :class:`IrLinesPipeline` | IR-Line inter-regional | grid_interregional_line_exchange | from_region_code, to_region_code, line_name, report_date |
+| :class:`IntlLinesPipeline` | IR-Line international | grid_international_line_exchange | country_code, line_name, report_date |
+| :class:`CrossBorderPipeline` | CrossBorder | grid_crossborder_market_schedule | country_code, contract_type, power_exchange (NULL for GNA/bilateral), direction, report_date |
+| :class:`TimeSeriesPipeline` | TimeSeries | grid_15min_scada | region_code (NULL = All India), interval_start |
 
 Every record carries ``source_published_at`` / ``source_available_at`` /
 ``availability_basis`` (decision G3; see :func:`api.availability`).
@@ -46,13 +51,22 @@ from src.ingestion.validation import CompositeValidator, FunctionValidator, Nume
 from src.loaders.table_loader import ConflictPolicy
 from src.pipelines.grid_india import api
 from src.pipelines.grid_india.entities import EXPECTED_SECTION_C, REGION_HEADINGS
+from src.pipelines.grid_india.errors import InvalidWorkbookError
 from src.pipelines.grid_india.parse_psp import (
+    TIMESERIES_FIRST_PUBLISHED,
+    parse_timeseries,
+    CROSSBORDER_FIRST_PUBLISHED,
+    parse_crossborder,
     parse_section_a,
+    parse_section_e,
     parse_section_f,
+    parse_intl_lines,
+    parse_ir_lines,
     parse_section_g,
     parse_states,
     read_workbook,
 )
+from src.pipelines.grid_india.reference import line_country
 
 PIPELINE_VERSION = "grid-india-1.0.0"
 MW_TOLERANCE = Decimal("1")      # published regional values are whole MW
@@ -373,6 +387,364 @@ class OutagePipeline(_PspSectionPipeline):
         return issues
 
 
+# ------------------------------------------------------------------ section E
+
+class ExchangePipeline(_PspSectionPipeline):
+    """Section E -> ``grid_regional_exchange`` (signed Schedule / Actual / published O/D/U/D per region)."""
+
+    dataset = _catalog_dataset("GRID_INDIA_EXCHANGE")
+    target_table = "grid_regional_exchange"
+    natural_key = ("region_code", "report_date")
+    section_label = "E"
+
+    def parse(self, document: RawDocument, context: RunContext) -> ParseResult:
+        workbook = read_workbook(document.content, expected_date=document.source_report_date)
+        result = parse_section_e(workbook)
+        self._parsed[id(document)] = result
+        return ParseResult(self._with_availability(document, result.records), result.failures)
+
+    def validator(self) -> Validator:
+        # Values are signed (import/over-drawal +ve, export/under-drawal -ve): no range limits.
+        return RequiredFields("region_code", "report_date", "sign_convention", "scheduled_exchange_mu",
+                              "actual_exchange_mu")
+
+    def document_issues(self, document: RawDocument, parsed: ParseResult, context: RunContext) -> list[DataQualityIssue]:
+        result = self._parsed.pop(id(document), None)
+        issues = self._availability_issues(document)
+        if result is None:
+            return issues
+        day = document.source_report_date
+        for label in result.unknown_labels:
+            issues.append(DataQualityIssue(self.target_table, "UNKNOWN_LABEL",
+                                           f"Section E row {label!r} on {day} is not mapped to a column; not loaded",
+                                           Severity.WARNING, f"{day}|{label}"))
+        for column in result.unknown_columns:
+            issues.append(DataQualityIssue(self.target_table, "UNKNOWN_COLUMN",
+                                           f"Section E column {column!r} on {day} is not a known region; not loaded",
+                                           Severity.WARNING, f"{day}|{column}"))
+        for name in result.missing_fields:
+            issues.append(DataQualityIssue(self.target_table, "MISSING_FIELD",
+                                           f"Section E row for {name} not found on {day}; stored as NULL",
+                                           Severity.WARNING, f"{day}|{name}"))
+        for what, parts_sum, published in result.totals:
+            if abs(parts_sum - published) > MU_TOLERANCE:
+                issues.append(DataQualityIssue(
+                    self.target_table, "TOTAL_MISMATCH",
+                    f"Section E {what} on {day}: {parts_sum} vs published {published} (difference "
+                    f"{parts_sum - published}); values stored as published", Severity.WARNING, f"{day}|{what}"))
+        for region, computed, published in result.od_checks:
+            if abs(computed - published) > MU_TOLERANCE:
+                issues.append(DataQualityIssue(
+                    self.target_table, "OD_UD_MISMATCH",
+                    f"Section E {region} on {day}: published O/D/U/D {published} vs Actual - Schedule {computed} "
+                    f"(difference {published - computed}); published value stored", Severity.WARNING,
+                    f"{day}|{region}"))
+        return issues
+
+
+# ---------------------------------------------------------------- IR-Line
+
+def _unmapped_ir_region(record: ParsedRecord) -> list[ValidationIssue]:
+    if record.values.get("from_region_code") and record.values.get("to_region_code"):
+        return []
+    return [ValidationIssue("UNMAPPED_REGION", f"IR-Line block {record.raw.get('block')!r} does not name two known "
+                            "regions (NR, WR, SR, ER, NER); not loaded", Severity.ERROR, "from_region_code")]
+
+
+class IrLinesPipeline(_PspSectionPipeline):
+    """IR-Line inter-regional part -> ``grid_interregional_line_exchange`` (one row per line)."""
+
+    dataset = _catalog_dataset("GRID_INDIA_PSP_IR_LINES")
+    target_table = "grid_interregional_line_exchange"
+    natural_key = ("from_region_code", "to_region_code", "line_name", "report_date")
+    section_label = "IR-Line (inter-regional)"
+
+    def parse(self, document: RawDocument, context: RunContext) -> ParseResult:
+        workbook = read_workbook(document.content, expected_date=document.source_report_date)
+        result = parse_ir_lines(workbook)
+        self._parsed[id(document)] = result
+        return ParseResult(self._with_availability(document, result.records), result.failures)
+
+    def validator(self) -> Validator:
+        return CompositeValidator(
+            FunctionValidator(_unmapped_ir_region),
+            RequiredFields("report_date", "line_name", "net_exchange_mu", "direction_convention"),
+            # Import and export are published as separate non-negative magnitudes.
+            *(NumericRange(f, minimum=0) for f in ("max_import_mw", "max_export_mw", "import_mu", "export_mu")),
+        )
+
+    def document_issues(self, document: RawDocument, parsed: ParseResult, context: RunContext) -> list[DataQualityIssue]:
+        result = self._parsed.pop(id(document), None)
+        issues = self._availability_issues(document)
+        if result is None:
+            return issues
+        day = document.source_report_date
+        for row in result.unknown_rows:
+            issues.append(DataQualityIssue(self.target_table, "UNKNOWN_ROW",
+                                           f"IR-Line row on {day} not recognised; not loaded: {row}",
+                                           Severity.WARNING, str(day)))
+        for record in result.records:
+            v = record.values
+            if None in (v["import_mu"], v["export_mu"], v["net_exchange_mu"]):
+                continue
+            computed = v["import_mu"] - v["export_mu"]
+            if abs(computed - v["net_exchange_mu"]) > MU_TOLERANCE:
+                issues.append(DataQualityIssue(
+                    self.target_table, "NET_MISMATCH",
+                    f"IR-Line {v['line_name']} on {day}: published NET {v['net_exchange_mu']} vs Import - Export "
+                    f"{computed}; published value stored", Severity.WARNING, record.key))
+        for pair, total, published, excluded in result.subtotals:
+            if all(abs(t - p) <= MU_TOLERANCE for t, p in zip(total, published)):
+                continue
+            if excluded:
+                issues.append(DataQualityIssue(
+                    self.target_table, "SUBTOTAL_EXCLUDES_LINE",
+                    f"IR-Line {pair} subtotal on {day} equals the sum of its lines without {excluded!r}",
+                    Severity.INFO, f"{day}|{pair}"))
+            else:
+                issues.append(DataQualityIssue(
+                    self.target_table, "TOTAL_MISMATCH",
+                    f"IR-Line {pair} subtotal on {day}: lines (import, export, net) {tuple(map(str, total))} vs "
+                    f"published {tuple(map(str, published))}; values stored as published", Severity.WARNING,
+                    f"{day}|{pair}"))
+        return issues
+
+
+def _intl_entity_checks(record: ParsedRecord) -> list[ValidationIssue]:
+    v, raw = record.values, record.raw or {}
+    if v.get("country_code") is None:
+        return [ValidationIssue("UNMAPPED_COUNTRY", f"International line {v.get('line_name')!r} is not in the exact "
+                                "line-name reference (src/pipelines/grid_india/reference.py); not loaded",
+                                Severity.ERROR, "country_code")]
+    issues = []
+    if raw.get("country_label") and raw.get("country_label_code") != v["country_code"]:
+        issues.append(ValidationIssue("COUNTRY_LABEL_CONFLICT", f"Published country label {raw['country_label']!r} "
+                                      f"disagrees with the reference ({v['country_code']}) for {v['line_name']!r}; "
+                                      "not loaded", Severity.ERROR, "country_code"))
+    if v.get("region_code") is None:
+        issues.append(ValidationIssue("UNMAPPED_REGION", f"Region cell {v.get('region_label')!r} does not start with "
+                                      "a known region; not loaded", Severity.ERROR, "region_code"))
+    return issues
+
+
+class IntlLinesPipeline(_PspSectionPipeline):
+    """IR-Line international part -> ``grid_international_line_exchange`` (one row per line)."""
+
+    dataset = _catalog_dataset("GRID_INDIA_PSP_INTL_LINES")
+    target_table = "grid_international_line_exchange"
+    natural_key = ("country_code", "line_name", "report_date")
+    section_label = "IR-Line (international)"
+
+    def parse(self, document: RawDocument, context: RunContext) -> ParseResult:
+        workbook = read_workbook(document.content, expected_date=document.source_report_date)
+        result = parse_intl_lines(workbook, line_country=line_country)
+        self._parsed[id(document)] = result
+        return ParseResult(self._with_availability(document, result.records), result.failures)
+
+    def validator(self) -> Validator:
+        # Values are signed (import +ve, export -ve): no range limits.
+        return CompositeValidator(
+            FunctionValidator(_intl_entity_checks),
+            RequiredFields("report_date", "line_name", "region_label", "energy_exchange_mu", "sign_convention"),
+        )
+
+    def document_issues(self, document: RawDocument, parsed: ParseResult, context: RunContext) -> list[DataQualityIssue]:
+        result = self._parsed.pop(id(document), None)
+        issues = self._availability_issues(document)
+        if result is None:
+            return issues
+        day = document.source_report_date
+        for label, total, published in result.section_d:
+            if abs(total - published) > MU_TOLERANCE:
+                issues.append(DataQualityIssue(
+                    self.target_table, "SECTION_D_MISMATCH",
+                    f"IR-Line international {label} on {day}: sum of lines {total} vs Section D Actual {published} "
+                    f"(difference {total - published}); values stored as published", Severity.WARNING,
+                    f"{day}|{label}"))
+        for line in result.mw_not_reported:
+            issues.append(DataQualityIssue(
+                self.target_table, "MW_NOT_REPORTED",
+                f"IR-Line international {line!r} on {day}: Max = Min = Avg = 0 MW with non-zero energy; stored as "
+                "published", Severity.INFO, f"{day}|{line[:60]}"))
+        return issues
+
+
+# ---------------------------------------------------------------- CrossBorder
+
+def _crossborder_checks(record: ParsedRecord) -> list[ValidationIssue]:
+    v, raw = record.values, record.raw or {}
+    issues = []
+    if v.get("country_code") is None:
+        issues.append(ValidationIssue("UNMAPPED_COUNTRY", f"CrossBorder country {raw.get('country_label')!r} is not a "
+                                      "known exact label (src/pipelines/grid_india/reference.py CROSSBORDER_COUNTRIES); "
+                                      "not loaded", Severity.ERROR, "country_code"))
+    if raw.get("duplicate"):
+        issues.append(ValidationIssue("DUPLICATE_ROW", f"CrossBorder {v.get('direction')} block lists "
+                                      f"{raw.get('country_label')!r} more than once; none of its rows loaded",
+                                      Severity.ERROR, "country_code"))
+    value = v.get("scheduled_energy_mu")
+    if v.get("direction") in ("EXPORT", "IMPORT") and value is not None and value < 0:
+        issues.append(ValidationIssue("OUT_OF_RANGE", f"CrossBorder {v['direction']} value {value} is negative; "
+                                      "Export and Import are published as non-negative magnitudes", Severity.ERROR,
+                                      "scheduled_energy_mu"))
+    return issues
+
+
+class CrossBorderPipeline(_PspSectionPipeline):
+    """CrossBorder -> ``grid_crossborder_market_schedule`` (scheduled MU per block x country x contract x exchange).
+
+    Export and Import rows are non-negative; Net rows (direction 'NET', migration 0005) are signed as published.
+    The row TOTAL column and the Total rows are validated, not stored (decision C4).
+    """
+
+    dataset = _catalog_dataset("GRID_INDIA_PSP_CROSSBORDER")
+    target_table = "grid_crossborder_market_schedule"
+    natural_key = ("country_code", "contract_type", "power_exchange", "direction", "report_date")
+    nullable_key_columns = ("power_exchange",)
+    section_label = "CrossBorder"
+
+    def parse(self, document: RawDocument, context: RunContext) -> ParseResult:
+        workbook = read_workbook(document.content, expected_date=document.source_report_date)
+        result = parse_crossborder(workbook)
+        self._parsed[id(document)] = result
+        return ParseResult(self._with_availability(document, result.records), result.failures)
+
+    def validator(self) -> Validator:
+        return CompositeValidator(
+            FunctionValidator(_crossborder_checks),
+            RequiredFields("report_date", "contract_type", "direction", "sign_convention"),
+        )
+
+    def document_issues(self, document: RawDocument, parsed: ParseResult, context: RunContext) -> list[DataQualityIssue]:
+        result = self._parsed.pop(id(document), None)
+        issues = self._availability_issues(document)
+        if result is None:
+            return issues
+        day = document.source_report_date
+        if result.not_published:
+            issues.append(DataQualityIssue(
+                self.target_table, "SECTION_NOT_PUBLISHED",
+                f"{document.document_name}: no CrossBorder sheet; it is published from {CROSSBORDER_FIRST_PUBLISHED} "
+                f"(report date {day})", Severity.INFO, str(day)))
+            return issues
+        for what in result.missing_values:
+            issues.append(DataQualityIssue(self.target_table, "MISSING_VALUE",
+                                           f"CrossBorder cell {what} is blank; stored as NULL, not derived",
+                                           Severity.WARNING, what))
+        for what in result.missing_countries:
+            issues.append(DataQualityIssue(self.target_table, "MISSING_COUNTRY",
+                                           f"CrossBorder {what} not found on {day}", Severity.WARNING, f"{day}|{what}"))
+        for row in result.unknown_rows:
+            issues.append(DataQualityIssue(self.target_table, "UNKNOWN_ROW",
+                                           f"CrossBorder on {day} not recognised; not loaded: {row}",
+                                           Severity.WARNING, str(day)))
+        for what, parts_sum, published in result.totals:
+            if abs(parts_sum - published) > MU_TOLERANCE:
+                issues.append(DataQualityIssue(
+                    self.target_table, "TOTAL_MISMATCH",
+                    f"CrossBorder {what} on {day}: sum {parts_sum} vs published {published} (difference "
+                    f"{parts_sum - published}); values stored as published", Severity.WARNING, f"{day}|{what}"))
+        for what, computed, published in result.net_checks:
+            if abs(computed - published) > MU_TOLERANCE:
+                issues.append(DataQualityIssue(
+                    self.target_table, "NET_MISMATCH",
+                    f"CrossBorder {what} on {day}: published Net {published} vs Import - Export {computed} "
+                    f"(difference {published - computed}); published value stored", Severity.WARNING,
+                    f"{day}|{what}"))
+        return issues
+
+
+# ----------------------------------------------------------------- TimeSeries
+
+def _timeseries_checks(record: ParsedRecord) -> list[ValidationIssue]:
+    if (record.raw or {}).get("duplicate"):
+        return [ValidationIssue("DUPLICATE_INTERVAL", f"TimeSeries mark {record.key} appears more than once; none of "
+                                "its rows loaded", Severity.ERROR, "interval_start")]
+    return []
+
+
+class TimeSeriesPipeline(_PspSectionPipeline):
+    """TimeSeries -> ``grid_15min_scada`` (all-India, region_code NULL; instantaneous values at each 15-minute mark).
+
+    Values are stored as published (decisions T3-T5, T8): telemetry-loss zeros are flagged, not replaced; storage
+    columns are NULL before they were published; a published Total that leaves out storage is kept.
+    """
+
+    dataset = _catalog_dataset("GRID_INDIA_SCADA")
+    target_table = "grid_15min_scada"
+    natural_key = ("region_code", "interval_start")
+    nullable_key_columns = ("region_code",)
+    section_label = "TimeSeries"
+
+    def parse(self, document: RawDocument, context: RunContext) -> ParseResult:
+        workbook = read_workbook(document.content, expected_date=document.source_report_date)
+        result = parse_timeseries(workbook)
+        section_a_max = None
+        if result.records:
+            try:   # same-scope cross-check (T7); Section A problems belong to the supply run, not this one
+                section_a_max = next((r.values["max_demand_met_mw"] for r in parse_section_a(workbook).records
+                                      if r.values["region_code"] is None), None)
+            except InvalidWorkbookError:
+                section_a_max = None
+        self._parsed[id(document)] = (result, section_a_max)
+        return ParseResult(self._with_availability(document, result.records), result.failures)
+
+    def validator(self) -> Validator:
+        # Values are as published: generation can be slightly negative (e.g. solar at night); no range rejection.
+        return CompositeValidator(FunctionValidator(_timeseries_checks), RequiredFields("interval_start"))
+
+    def document_issues(self, document: RawDocument, parsed: ParseResult, context: RunContext) -> list[DataQualityIssue]:
+        stashed = self._parsed.pop(id(document), None)
+        issues = self._availability_issues(document)
+        if stashed is None:
+            return issues
+        result, section_a_max = stashed
+        day = document.source_report_date
+        t = self.target_table
+        if result.not_published:
+            issues.append(DataQualityIssue(t, "SECTION_NOT_PUBLISHED", f"{document.document_name}: no TimeSeries sheet; "
+                                           f"it is published from {TIMESERIES_FIRST_PUBLISHED} (report date {day})",
+                                           Severity.INFO, str(day)))
+            return issues
+        if not result.records and not result.failures:
+            issues.append(DataQualityIssue(t, "NO_INTERVAL_DATA", f"{document.document_name}: TimeSeries sheet for {day} "
+                                           "has headers but no 15-minute rows; nothing loaded", Severity.WARNING, str(day)))
+            return issues
+        for mark in result.missing_marks:
+            issues.append(DataQualityIssue(t, "MISSING_INTERVAL", f"TimeSeries {day} {mark} not published; not filled",
+                                           Severity.WARNING, f"{day}|{mark}"))
+        for what in result.missing_values:
+            issues.append(DataQualityIssue(t, "MISSING_VALUE", f"TimeSeries cell {what} is blank; stored as NULL, not "
+                                           "derived", Severity.WARNING, what))
+        for row in result.unknown_rows:
+            issues.append(DataQualityIssue(t, "UNKNOWN_ROW", f"TimeSeries on {day} not recognised; not loaded: {row}",
+                                           Severity.WARNING, str(day)))
+        for mark, published, expected in result.net_demand_mismatches:
+            issues.append(DataQualityIssue(t, "NET_DEMAND_MISMATCH", f"TimeSeries {day} {mark}: published Net Demand Met "
+                                           f"{published} vs Demand - Wind - Solar {expected}; published value stored",
+                                           Severity.WARNING, f"{day}|{mark}"))
+        for mark, published, parts in result.total_mismatches:
+            issues.append(DataQualityIssue(t, "TOTAL_MISMATCH", f"TimeSeries {day} {mark}: published Total Generation "
+                                           f"{published} vs sum of sources {parts} (difference {published - parts}); "
+                                           "published value stored", Severity.WARNING, f"{day}|{mark}"))
+        if result.total_excludes_storage:
+            marks = result.total_excludes_storage
+            issues.append(DataQualityIssue(t, "TOTAL_EXCLUDES_STORAGE", f"TimeSeries {day}: published Total Generation "
+                                           f"equals the sum of sources without Storage (PSP&BESS) at {len(marks)} marks "
+                                           f"({marks[0]}..{marks[-1]}); published values stored", Severity.INFO, str(day)))
+        for mark, reason in result.telemetry_suspect:
+            issues.append(DataQualityIssue(t, "TELEMETRY_SUSPECT", f"TimeSeries {day} {mark}: {reason}; stored as "
+                                           "published", Severity.WARNING, f"{day}|{mark}"))
+        if section_a_max is not None and result.max_demand_mw is not None \
+                and result.max_demand_mw > section_a_max + MW_TOLERANCE:
+            issues.append(DataQualityIssue(t, "MAX_DEMAND_ABOVE_SECTION_A", f"TimeSeries {day}: highest 15-minute demand "
+                                           f"{result.max_demand_mw} MW exceeds Section A maximum demand met (1-minute "
+                                           f"SCADA) {section_a_max} MW", Severity.WARNING, str(day)))
+        return issues
+
+
 SECTION_PIPELINES: dict[str, type[_PspSectionPipeline]] = {
     "supply": SupplyPipeline, "states": StatesPipeline, "fuel": FuelPipeline, "outage": OutagePipeline,
+    "exchange": ExchangePipeline, "ir_lines": IrLinesPipeline, "intl_lines": IntlLinesPipeline,
+    "crossborder": CrossBorderPipeline, "timeseries": TimeSeriesPipeline,
 }

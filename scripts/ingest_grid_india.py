@@ -8,6 +8,9 @@ Usage (from the project root)::
     # A range (inclusive operating days, at most 31), chosen sections
     python -m scripts.ingest_grid_india psp --start-date 2026-11-01 --end-date 2026-11-10 --sections supply,states
 
+    # Once, before international lines / CrossBorder: seed the country reference rows (idempotent)
+    python -m scripts.ingest_grid_india reference [--dry-run]
+
     # Re-parse workbooks already ingested (after a parser fix); unchanged records are skipped
     python -m scripts.ingest_grid_india psp --date 2026-11-10 --reprocess
 
@@ -25,10 +28,12 @@ from collections.abc import Sequence
 from datetime import date
 
 from config.settings import Settings, get_settings
+from src.common.database import DatabaseManager
 from src.common.exceptions import ConfigurationError
 from src.common.logging_config import get_logger, setup_logging
 from src.pipelines.grid_india import api
 from src.pipelines.grid_india.pipeline import SECTION_PIPELINES
+from src.pipelines.grid_india.reference import seed_countries
 from src.pipelines.grid_india.runner import PspRunSummary, run_grid_india_psp
 
 logger = get_logger("scripts.ingest_grid_india")
@@ -44,6 +49,8 @@ def _date(value: str) -> date:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Grid-India (NLDC) Daily PSP workbook ingestion.")
     sub = parser.add_subparsers(dest="command", required=True)
+    ref = sub.add_parser("reference", help="seed country reference rows (BTN, NPL, BGD, MMR) for international lines and CrossBorder")
+    ref.add_argument("--dry-run", action="store_true", help="show what would be inserted, then roll back")
     p = sub.add_parser("psp", help="Daily PSP workbook: " + ", ".join(
         f"{name} (section {cls.section_label} -> {cls.target_table})" for name, cls in SECTION_PIPELINES.items()))
     when = p.add_mutually_exclusive_group(required=True)
@@ -80,9 +87,30 @@ def _print(summary: PspRunSummary) -> None:
         print(f"Dry-run raw files: {summary.raw_data_dir}")
 
 
+def _reference(settings: Settings, dry_run: bool) -> int:
+    manager = DatabaseManager.from_settings(settings)
+    try:
+        with manager.engine.connect() as connection:
+            transaction = connection.begin()
+            result = seed_countries(connection, settings.db_schema)
+            transaction.rollback() if dry_run else transaction.commit()
+    finally:
+        manager.dispose()
+    print(f"Grid-India country reference rows - {'DRY RUN (rolled back)' if dry_run else 'committed'}")
+    print(f"  inserted:  {result.inserted}")
+    print(f"  unchanged: {result.unchanged}")
+    if result.differing:
+        print(f"  existing rows with a different name (left unchanged): {result.differing}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "reference":
+        settings = settings or get_settings()
+        setup_logging(settings, stream=sys.stderr)
+        return _reference(settings, args.dry_run)
     if args.date is not None and args.end_date is not None:
         parser.error("--end-date requires --start-date, not --date")
     if args.start_date is not None and args.end_date is None:

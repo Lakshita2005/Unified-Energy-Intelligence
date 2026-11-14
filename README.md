@@ -134,8 +134,12 @@ python -m scripts.ingest_cea psp-energy --month 2026-08
 NLDC Daily PSP workbook (XLS from 2023): each workbook is downloaded and stored
 once and parsed by one pipeline per table, each with its own ingestion run.
 Implemented: Section A (`grid_daily_power_supply`, All India = NULL region),
-Sections C + J (`grid_state_power_supply`), Section G (`grid_sourcewise_generation`) and
-Section F (`grid_generation_outage`). Availability: actual upload time
+Sections C + J (`grid_state_power_supply`), Section G (`grid_sourcewise_generation`),
+Section F (`grid_generation_outage`), Section E (`grid_regional_exchange`, migration `0003`) and IR-Line
+(`grid_interregional_line_exchange`, `grid_international_line_exchange`, migration `0004`) and CrossBorder
+(`grid_crossborder_market_schedule`, Export/Import/Net schedules, migration `0005`; country rows via
+`python -m scripts.ingest_grid_india reference`) and TimeSeries (`grid_15min_scada`, all-India instantaneous
+15-minute SCADA, migration `0006`). Availability: actual upload time
 from 2025-05-12, else an explicit D+2 09:00 IST estimate (Alembic `0002_grid_india`).
 Terms of use not yet verified. Full details: `docs/grid_india_pipeline.md`.
 
