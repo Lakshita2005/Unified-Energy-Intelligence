@@ -69,7 +69,14 @@ from src.ingestion.models import (
 )
 from src.ingestion.repositories import IngestionRepository
 from src.ingestion.validation import NoOpValidator, Validator, validate_records
-from src.loaders.table_loader import ConflictPolicy, LoadIssue, LoadResult, RowToLoad, TableLoader
+from src.loaders.table_loader import (
+    DEFAULT_LINEAGE_COLUMNS,
+    ConflictPolicy,
+    LoadIssue,
+    LoadResult,
+    RowToLoad,
+    TableLoader,
+)
 
 logger = get_logger(__name__)
 
@@ -136,6 +143,11 @@ class BaseIngestionPipeline(ABC):
             authoritative copy, and JSONB does not preserve formatting or key order.
         fetch_attempts: Attempts for the whole fetch step on transient network
             errors (individual HTTP requests are already retried by HttpClient).
+        extra_lineage_columns: Columns that describe where a value came from (e.g. a
+            source revision number) rather than what it says. Like the default
+            lineage columns, they are stored but never make a row "changed", so a
+            new version is created only when a measured value changes. Must not
+            overlap the natural key. Empty by default (no behaviour change).
     """
 
     source: ClassVar[SourceDefinition]
@@ -151,6 +163,7 @@ class BaseIngestionPipeline(ABC):
     # Opt-in per instance: when True, byte-identical documents are re-parsed and their
     # records loaded again (unchanged records are skipped by the loader). Off by default.
     reload_duplicate_documents: bool = False
+    extra_lineage_columns: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(
         self,
@@ -168,12 +181,16 @@ class BaseIngestionPipeline(ABC):
         self.database: TransactionalDatabase = database or DatabaseManager.from_settings(self.settings)
         self.raw_storage = raw_storage or create_raw_storage_manager(self.settings)
         self.repository = IngestionRepository(self.settings.db_schema)
+        overlap = sorted(set(self.extra_lineage_columns) & set(self.natural_key))
+        if overlap:
+            raise TypeError(f"{type(self).__name__}: extra_lineage_columns overlap the natural key: {overlap}")
         self.loader = TableLoader(
             self.target_table,
             schema=self.settings.db_schema,
             natural_key=self.natural_key,
             nullable_key_columns=self.nullable_key_columns,
             conflict_policy=self.conflict_policy,
+            ignore_columns=DEFAULT_LINEAGE_COLUMNS | self.extra_lineage_columns,
         )
         self._http_client = http_client
         self._owns_http_client = False

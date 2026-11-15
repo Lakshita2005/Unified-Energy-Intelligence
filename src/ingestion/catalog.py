@@ -37,6 +37,9 @@ SOURCES: dict[str, SourceDefinition] = {
         # Publishers of weekly Deviation Settlement Account statements. There is
         # no single website: each RPC (NRPC, WRPC, SRPC, ERPC, NERPC) has its own.
         SourceDefinition("RPC", "Regional Power Committees (NRPC, WRPC, SRPC, ERPC, NERPC)", None),
+        # Grid-India's Web Based Energy Scheduling portal: a separate system from grid-india.in, with its own
+        # login (user + OTP + CAPTCHA) and terms (decision W3).
+        SourceDefinition("WBES", "Grid-India WBES (Web Based Energy Scheduling)", "https://newwbes.grid-india.in/"),
     )
 }
 
@@ -292,6 +295,27 @@ DATASETS: tuple[CatalogDataset, ...] = (
         "15min", "intraday (half-hourly sessions)", ("iex_market_price",),
         notes="15-minute data from 2020-06-01. MCP only (area MKT): the rtm/area-price endpoint returned no rows "
               "for any bid area. The current day fills in as sessions clear.",
+    ),
+    # ------------------------------------------------------------------ WBES
+    _dataset(
+        "WBES", "WBES_PX_REGION", "WBES PX Dashboard - region-wise injection / drawal",
+        "WBES PX Dashboard (login-gated, undocumented JSON API at https://newwbes-api.grid-india.in): POST /powerexchange/api/PowerExchange/GetPowerExchangeByDetails per delivery date x power exchange (GetPxTypeList) x market (GetPxTransTypeList), RevisionNo -1 (all revisions). One response feeds WBES_PX_REGION, WBES_PX_LINK and WBES_PX_ENTITY.",
+        "15min", "intraday", ("wbes_px_region_schedule",),
+        notes="Units and region-id mapping unverified (values stored as published; region_code NULL until verified). "
+              "Revision number, PowerExId and CreatedOn are lineage; new versions only when values change.",
+    ),
+    _dataset(
+        "WBES", "WBES_PX_LINK", "WBES PX Dashboard - link-wise net amount",
+        "WBES PX Dashboard (login-gated, undocumented JSON API at https://newwbes-api.grid-india.in): POST /powerexchange/api/PowerExchange/GetPowerExchangeByDetails per delivery date x power exchange (GetPxTypeList) x market (GetPxTransTypeList), RevisionNo -1 (all revisions). One response feeds WBES_PX_REGION, WBES_PX_LINK and WBES_PX_ENTITY.",
+        "15min", "intraday", ("wbes_px_link_schedule",),
+        notes="Units and NetAmount sign convention unverified; values stored as published.",
+    ),
+    _dataset(
+        "WBES", "WBES_PX_ENTITY", "WBES PX Dashboard - entity-wise injection / drawal",
+        "WBES PX Dashboard (login-gated, undocumented JSON API at https://newwbes-api.grid-india.in): POST /powerexchange/api/PowerExchange/GetPowerExchangeByDetails per delivery date x power exchange (GetPxTypeList) x market (GetPxTransTypeList), RevisionNo -1 (all revisions). One response feeds WBES_PX_REGION, WBES_PX_LINK and WBES_PX_ENTITY.",
+        "15min", "intraday", ("wbes_px_entity_schedule",),
+        notes="Units and entity-key uniqueness unverified (no unique constraint; duplicate keys within a revision "
+              "are rejected and reported).",
     ),
     # ----------------------------------------------------------- Open-Meteo
     _dataset(

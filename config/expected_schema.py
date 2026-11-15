@@ -58,6 +58,10 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         # Markets and weather
         "iex_market_price",
         "open_meteo_weather",
+        # WBES PX Dashboard (Alembic 0007_wbes_px)
+        "wbes_px_entity_schedule",
+        "wbes_px_link_schedule",
+        "wbes_px_region_schedule",
         # Features and forecasting
         "feature_definition",
         "feature_source_map",

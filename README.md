@@ -148,6 +148,21 @@ python -m scripts.ingest_grid_india psp --date 2026-11-10 --dry-run
 python -m scripts.ingest_grid_india psp --start-date 2026-11-04 --end-date 2026-11-09
 ```
 
+## WBES pipeline (PX Dashboard)
+
+Grid-India WBES power-exchange schedules behind a personal login: one PX response per
+delivery date x exchange x market feeds `wbes_px_region_schedule`, `wbes_px_link_schedule` and
+`wbes_px_entity_schedule` (migration `0007_wbes_px`). Independent implementation; **live WBES
+access is not yet authorised**, so it has only been run against mocked HTTP. Login is interactive
+(you enter username, OTP, CAPTCHA); the session file lives outside the project and OneDrive; one
+WBES process at a time (advisory lock). Units, CreatedOn format and region mapping are unverified.
+Full details: `docs/wbes_pipeline.md`.
+
+```bash
+python -m scripts.ingest_wbes login
+python -m scripts.ingest_wbes px --date 2026-11-10 --exchanges IEX --markets DAM --dry-run
+```
+
 ## Common commands
 
 ```bash

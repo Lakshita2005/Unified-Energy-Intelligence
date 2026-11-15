@@ -106,13 +106,30 @@ class Settings(BaseSettings):
     grid_india_api_base_url: str = "https://webapi.grid-india.in/api/v1"
     grid_india_cdn_base_url: str = "https://webcdn.grid-india.in"
 
+    # --- WBES (Grid-India Web Based Energy Scheduling) -------------------------
+    # Login-gated, undocumented JSON API behind newwbes.grid-india.in. The login is
+    # interactive (username + OTP + CAPTCHA by a person); tokens are kept in a session
+    # file OUTSIDE the project, OneDrive and raw-data directories (never in .env/DB/logs).
+    wbes_api_base_url: str = "https://newwbes-api.grid-india.in"
+    wbes_portal_url: str = "https://newwbes.grid-india.in/site/open-access/px"
+    wbes_utility_id: str | None = None          # your WBES utility id (32 hex characters); not a secret
+    wbes_session_file: Path | None = None       # default: <local app data>/pi/wbes/session.json
+    wbes_refresh_margin_seconds: int = Field(default=150, ge=30)
+    wbes_request_pause_seconds: float = Field(default=0.5, ge=0)
+    wbes_login_wait_minutes: int = Field(default=15, ge=1)
+    wbes_login_browser: str = "chrome"          # chrome, msedge or chromium (Playwright)
+    # Time zone of WBES CreatedOn values that carry no offset. Unverified until live verification:
+    # 'unverified' uses the later plausible reading (UTC unless after retrieval, then IST) so that
+    # availability is never earlier than the truth; set 'Asia/Kolkata' or 'UTC' once confirmed.
+    wbes_created_on_naive_timezone: Literal["unverified", "Asia/Kolkata", "UTC"] = "unverified"
+
     # --- Raw storage -------------------------------------------------------
     raw_storage_backend: RawStorageBackendName = "local"
     raw_data_dir: Path = Path("raw_data")
     raw_storage_write_metadata: bool = True
 
     @field_validator("db_host", "db_name", "db_user", "db_password", "db_sslmode", "open_meteo_api_key",
-                     mode="before")
+                     "wbes_utility_id", "wbes_session_file", mode="before")
     @classmethod
     def _blank_to_none(cls, value: Any, info: ValidationInfo) -> Any:
         """Treat empty strings (e.g. ``DB_HOST=`` in .env) as unset.

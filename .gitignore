@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+# Login session/token files (the WBES session file must live outside the project anyway)
+*_session.json
+wbes_session*.json
+session.json
 
 # Python
 __pycache__/

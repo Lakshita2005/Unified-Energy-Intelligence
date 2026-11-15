@@ -14,6 +14,7 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `OPEN_METEO` | Open-Meteo | https://open-meteo.com/ |
 | `IEX` | Indian Energy Exchange | https://www.iexindia.com/ |
 | `RPC` | Regional Power Committees (NRPC, WRPC, SRPC, ERPC, NERPC) | — (no single site) |
+| `WBES` | Grid-India WBES (Web Based Energy Scheduling) | https://newwbes.grid-india.in/ |
 
 ## Registered datasets
 
@@ -38,6 +39,9 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `IEX_DAM` | `IEX` | `iex_market_price` | 15min | daily | Asia/Kolkata |
 | `IEX_GDAM` | `IEX` | `iex_market_price` | 15min | daily | Asia/Kolkata |
 | `IEX_RTM` | `IEX` | `iex_market_price` | 15min | intraday (half-hourly sessions) | Asia/Kolkata |
+| `WBES_PX_REGION` | `WBES` | `wbes_px_region_schedule` | 15min | intraday | Asia/Kolkata |
+| `WBES_PX_LINK` | `WBES` | `wbes_px_link_schedule` | 15min | intraday | Asia/Kolkata |
+| `WBES_PX_ENTITY` | `WBES` | `wbes_px_entity_schedule` | 15min | intraday | Asia/Kolkata |
 | `OPEN_METEO_FORECAST` | `OPEN_METEO` | `open_meteo_weather` | hourly | daily | UTC |
 | `OPEN_METEO_HISTORICAL` | `OPEN_METEO` | `open_meteo_weather` | hourly | daily | UTC |
 | `DSM_SCHEDULE_INTERSTATE` | `GRID_INDIA` | `dsm_plant_schedule_actual` | 15min | PENDING_CONFIRMATION | Asia/Kolkata |
@@ -177,6 +181,27 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 - **Endpoint / report:** IEX API: https://www.iexindia.com/api/v1/rtm/market-snapshot?interval=ONE_FOURTH_HOUR&fromDate={DD-MM-YYYY}&toDate={DD-MM-YYYY}. Page: https://www.iexindia.com/market-data/real-time-market/market-snapshot
 - **Destination:** `iex_market_price`
 - **Notes:** 15-minute data from 2020-06-01. MCP only (area MKT): the rtm/area-price endpoint returned no rows for any bid area. The current day fills in as sessions clear.
+
+#### `WBES_PX_REGION` — WBES PX Dashboard - region-wise injection / drawal
+
+- **Source:** `WBES`
+- **Endpoint / report:** WBES PX Dashboard (login-gated, undocumented JSON API at https://newwbes-api.grid-india.in): POST /powerexchange/api/PowerExchange/GetPowerExchangeByDetails per delivery date x power exchange (GetPxTypeList) x market (GetPxTransTypeList), RevisionNo -1 (all revisions). One response feeds WBES_PX_REGION, WBES_PX_LINK and WBES_PX_ENTITY.
+- **Destination:** `wbes_px_region_schedule`
+- **Notes:** Units and region-id mapping unverified (values stored as published; region_code NULL until verified). Revision number, PowerExId and CreatedOn are lineage; new versions only when values change.
+
+#### `WBES_PX_LINK` — WBES PX Dashboard - link-wise net amount
+
+- **Source:** `WBES`
+- **Endpoint / report:** WBES PX Dashboard (login-gated, undocumented JSON API at https://newwbes-api.grid-india.in): POST /powerexchange/api/PowerExchange/GetPowerExchangeByDetails per delivery date x power exchange (GetPxTypeList) x market (GetPxTransTypeList), RevisionNo -1 (all revisions). One response feeds WBES_PX_REGION, WBES_PX_LINK and WBES_PX_ENTITY.
+- **Destination:** `wbes_px_link_schedule`
+- **Notes:** Units and NetAmount sign convention unverified; values stored as published.
+
+#### `WBES_PX_ENTITY` — WBES PX Dashboard - entity-wise injection / drawal
+
+- **Source:** `WBES`
+- **Endpoint / report:** WBES PX Dashboard (login-gated, undocumented JSON API at https://newwbes-api.grid-india.in): POST /powerexchange/api/PowerExchange/GetPowerExchangeByDetails per delivery date x power exchange (GetPxTypeList) x market (GetPxTransTypeList), RevisionNo -1 (all revisions). One response feeds WBES_PX_REGION, WBES_PX_LINK and WBES_PX_ENTITY.
+- **Destination:** `wbes_px_entity_schedule`
+- **Notes:** Units and entity-key uniqueness unverified (no unique constraint; duplicate keys within a revision are rejected and reported).
 
 #### `OPEN_METEO_FORECAST` — Open-Meteo weather forecast
 
