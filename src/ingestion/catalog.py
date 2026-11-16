@@ -40,6 +40,8 @@ SOURCES: dict[str, SourceDefinition] = {
         # Grid-India's Web Based Energy Scheduling portal: a separate system from grid-india.in, with its own
         # login (user + OTP + CAPTCHA) and terms (decision W3).
         SourceDefinition("WBES", "Grid-India WBES (Web Based Energy Scheduling)", "https://newwbes.grid-india.in/"),
+        # India Meteorological Department API platform (access by IMD approval and IP whitelisting).
+        SourceDefinition("IMD", "India Meteorological Department", "https://mausam.imd.gov.in/"),
     )
 }
 
@@ -349,7 +351,29 @@ DATASETS: tuple[CatalogDataset, ...] = (
         notes="Settlement period start/end per statement. Revisions must be loaded as new versions, "
               "not overwrites.",
     ),
+    # ------------------------------------------------------------------ IMD
+    # Tables from Alembic 0008_imd (applied 2026-11-16). Live IMD access is not yet authorised.
+    _dataset(
+        "IMD", "IMD_AWS_OBS", "IMD AWS/ARG station observations",
+        "IMD API (https://api.imd.gov.in/api/v1): GET /aws_data (optionally ?id=<call sign> or ?sid=<state id>) "
+        "for observations and GET /aws_data_mapping for stations. Access requires IMD approval and IP "
+        "whitelisting.",
+        "station observation", "intraday", ("imd_station", "imd_station_observation"),
+        notes="Response container, units, DATE/TIME time zone and identifier uniqueness are unverified; values "
+              "are stored as published in neutral *_value columns. The mapping endpoint's fields are not documented.",
+    ),
+    _dataset(
+        "IMD", "IMD_CITY_FORECAST", "IMD 7-day city weather forecast",
+        "IMD API (https://api.imd.gov.in/api/v1): GET /cityforecast (optionally ?id=<station code>). Access requires "
+        "IMD approval and IP whitelisting.",
+        "daily", "daily", ("imd_city_forecast",),
+        notes="One vintage per published Date (issue time not published). Only forecast fields are loaded; the "
+              "observed and astronomical fields of the response are kept in raw storage.",
+    ),
 )
+
+# The IMD entries of DATASETS (used by the IMD pipelines).
+IMD_DATASETS: tuple[CatalogDataset, ...] = tuple(entry for entry in DATASETS if entry.source_code == "IMD")
 
 PENDING_DATASETS: tuple[PendingDataset, ...] = (
     PendingDataset(

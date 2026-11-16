@@ -15,6 +15,7 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `IEX` | Indian Energy Exchange | https://www.iexindia.com/ |
 | `RPC` | Regional Power Committees (NRPC, WRPC, SRPC, ERPC, NERPC) | — (no single site) |
 | `WBES` | Grid-India WBES (Web Based Energy Scheduling) | https://newwbes.grid-india.in/ |
+| `IMD` | India Meteorological Department | https://mausam.imd.gov.in/ |
 
 ## Registered datasets
 
@@ -46,6 +47,8 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `OPEN_METEO_HISTORICAL` | `OPEN_METEO` | `open_meteo_weather` | hourly | daily | UTC |
 | `DSM_SCHEDULE_INTERSTATE` | `GRID_INDIA` | `dsm_plant_schedule_actual` | 15min | PENDING_CONFIRMATION | Asia/Kolkata |
 | `DSM_SETTLEMENT_REGIONAL` | `RPC` | `dsm_settlement` | weekly | weekly | Asia/Kolkata |
+| `IMD_AWS_OBS` | `IMD` | `imd_station`<br>`imd_station_observation` | station observation | intraday | Asia/Kolkata |
+| `IMD_CITY_FORECAST` | `IMD` | `imd_city_forecast` | daily | daily | Asia/Kolkata |
 
 ### Dataset details
 
@@ -230,6 +233,20 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 - **Endpoint / report:** Weekly DSM statements issued by each RPC Secretariat (CERC DSM Regulations 2024). Verified listing: ERPC https://erpc.gov.in/dsm-rras-fras-and-sced-accts; NRPC/WRPC/SRPC/NERPC locations PENDING_CONFIRMATION. PDF formats vary by RPC; revised statements are issued for past weeks
 - **Destination:** `dsm_settlement`
 - **Notes:** Settlement period start/end per statement. Revisions must be loaded as new versions, not overwrites.
+
+#### `IMD_AWS_OBS` — IMD AWS/ARG station observations
+
+- **Source:** `IMD`
+- **Endpoint / report:** IMD API (https://api.imd.gov.in/api/v1): GET /aws_data (optionally ?id=<call sign> or ?sid=<state id>) for observations and GET /aws_data_mapping for stations. Access requires IMD approval and IP whitelisting.
+- **Destination:** `imd_station`, `imd_station_observation`
+- **Notes:** Response container, units, DATE/TIME time zone and identifier uniqueness are unverified; values are stored as published in neutral *_value columns. The mapping endpoint's fields are not documented.
+
+#### `IMD_CITY_FORECAST` — IMD 7-day city weather forecast
+
+- **Source:** `IMD`
+- **Endpoint / report:** IMD API (https://api.imd.gov.in/api/v1): GET /cityforecast (optionally ?id=<station code>). Access requires IMD approval and IP whitelisting.
+- **Destination:** `imd_city_forecast`
+- **Notes:** One vintage per published Date (issue time not published). Only forecast fields are loaded; the observed and astronomical fields of the response are kept in raw storage.
 
 ## Pending datasets (not registered)
 

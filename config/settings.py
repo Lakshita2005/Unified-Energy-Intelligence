@@ -123,13 +123,25 @@ class Settings(BaseSettings):
     # availability is never earlier than the truth; set 'Asia/Kolkata' or 'UTC' once confirmed.
     wbes_created_on_naive_timezone: Literal["unverified", "Asia/Kolkata", "UTC"] = "unverified"
 
+    # --- IMD (India Meteorological Department) -----------------------------------
+    # API platform documented at https://api.imd.gov.in/public/api_reference.html. Access requires IMD
+    # approval (nodal officer) and IP whitelisting; whether a key/token is also issued is unverified.
+    # If IMD issues one, set both IMD_API_KEY and IMD_API_KEY_HEADER (the header name IMD specifies).
+    imd_api_base_url: str = "https://api.imd.gov.in/api/v1"
+    imd_api_key: SecretStr | None = None
+    imd_api_key_header: str | None = None
+    imd_request_pause_seconds: float = Field(default=1.0, ge=0)
+    # Time zone of the AWS DATE/TIME fields: unverified. While 'unverified', observed_at stays NULL and
+    # only the published date and time are stored.
+    imd_aws_time_zone: Literal["unverified", "Asia/Kolkata", "UTC"] = "unverified"
+
     # --- Raw storage -------------------------------------------------------
     raw_storage_backend: RawStorageBackendName = "local"
     raw_data_dir: Path = Path("raw_data")
     raw_storage_write_metadata: bool = True
 
     @field_validator("db_host", "db_name", "db_user", "db_password", "db_sslmode", "open_meteo_api_key",
-                     "wbes_utility_id", "wbes_session_file", mode="before")
+                     "wbes_utility_id", "wbes_session_file", "imd_api_key", "imd_api_key_header", mode="before")
     @classmethod
     def _blank_to_none(cls, value: Any, info: ValidationInfo) -> Any:
         """Treat empty strings (e.g. ``DB_HOST=`` in .env) as unset.

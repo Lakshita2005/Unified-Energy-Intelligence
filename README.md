@@ -163,6 +163,19 @@ python -m scripts.ingest_wbes login
 python -m scripts.ingest_wbes px --date 2026-11-10 --exchanges IEX --markets DAM --dry-run
 ```
 
+## IMD pipeline (AWS observations, city forecasts)
+
+India Meteorological Department API (`api.imd.gov.in`): AWS/ARG stations and observations
+(`imd_station`, `imd_station_observation`) and 7-day city forecasts (`imd_city_forecast`, one
+vintage per issue date). Separate from Open-Meteo. **Not live:** IMD access needs approval and IP
+whitelisting (not yet authorised); migration `0008_imd` is applied and both datasets are registered. Units, timestamps and
+identifiers are unverified. Full details: `docs/imd_pipeline.md`.
+
+```bash
+python -m scripts.ingest_imd aws --dry-run
+python -m scripts.ingest_imd city-forecast --dry-run
+```
+
 ## Common commands
 
 ```bash
