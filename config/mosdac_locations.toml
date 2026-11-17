@@ -1,0 +1,71 @@
+# Plant locations for MOSDAC solar / wind energy forecasts (src/pipelines/mosdac).
+#
+# Same [[location]] format and validation as the Open-Meteo weather locations
+# (see config/weather_locations.example.toml), but a SEPARATE file: these plants
+# are not registered in pi.weather_location, so Open-Meteo runs never include them.
+#
+#   code               Stable upper-case identifier; stored as location_code and used
+#                      as the raw-data folder (lower-cased). Never reuse a code for
+#                      different coordinates (the runner refuses a moved location).
+#   name               Human-readable name.
+#   latitude/longitude WGS84 decimal degrees, at most 7 decimal places; sent to MOSDAC
+#                      exactly as written here.
+#   coordinate_source  Where the coordinates come from.
+#
+# None of these codes exists in pi.plant (checked 2026-11-17), so no plant_code is set.
+
+[[location]]
+code = "ESEPL"
+name = "ESEPL"
+latitude = 17.4042
+longitude = 77.3753
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "NSPL"
+name = "NSPL"
+latitude = 12.0981737
+longitude = 76.8406883
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "ASPL"
+name = "ASPL"
+latitude = 16.40612
+longitude = 78.69986
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "GSPL_GAP"
+name = "GSPL_GAP"
+latitude = 16.6243
+longitude = 78.0630
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "GSPL_GUM"
+name = "GSPL_GUM"
+latitude = 17.7550
+longitude = 78.4220
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "PSPL"
+name = "PSPL"
+latitude = 18.41415
+longitude = 78.21599
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "RSPL"
+name = "RSPL"
+latitude = 18.7897
+longitude = 77.9162
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"
+
+[[location]]
+code = "TSPL"
+name = "TSPL"
+latitude = 18.0256
+longitude = 78.7899
+coordinate_source = "Supplied by Resolven in the MOSDAC ingestion task brief (2026-11-17)"

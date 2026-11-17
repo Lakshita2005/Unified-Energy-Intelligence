@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     # only the published date and time are stored.
     imd_aws_time_zone: Literal["unverified", "Asia/Kolkata", "UTC"] = "unverified"
 
+    # --- MOSDAC (ISRO Space Applications Centre) energy forecasts -------------------
+    # GET <base>/solar?lat=&lon= and <base>/wind?lat=&lon= (no key or login per the supplied endpoint
+    # information). Plant coordinates come from a TOML file in the weather-location format.
+    mosdac_api_base_url: str = "https://mosdac.gov.in/apienergy"
+    mosdac_locations_file: Path = Path("config/mosdac_locations.toml")
+    mosdac_request_pause_seconds: float = Field(default=1.0, ge=0)
+
     # --- Raw storage -------------------------------------------------------
     raw_storage_backend: RawStorageBackendName = "local"
     raw_data_dir: Path = Path("raw_data")
@@ -172,7 +179,7 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_LEVEL must be one of {sorted(_VALID_LOG_LEVELS)}, got {value!r}")
         return level
 
-    @field_validator("log_dir", "raw_data_dir", "weather_locations_file")
+    @field_validator("log_dir", "raw_data_dir", "weather_locations_file", "mosdac_locations_file")
     @classmethod
     def _resolve_relative_paths(cls, value: Path) -> Path:
         """Interpret relative paths as relative to the project root."""

@@ -176,6 +176,19 @@ python -m scripts.ingest_imd aws --dry-run
 python -m scripts.ingest_imd city-forecast --dry-run
 ```
 
+## MOSDAC pipeline (solar and wind energy forecasts)
+
+MOSDAC (ISRO SAC) `apienergy/solar` and `apienergy/wind` forecasts per plant location
+(`config/mosdac_locations.toml`, eight plants) into `mosdac_solar_forecast` (air temperature, solar
+flux, not GHI) and `mosdac_wind_forecast` (speed and direction, units unverified). Every forecast
+series and revision is kept. Separate from Open-Meteo and IMD, and not a confirmed IMD replacement.
+Migration `0009_mosdac` is applied and both datasets are registered; no ingestion run yet. Full details: `docs/mosdac_pipeline.md`.
+
+```bash
+python -m scripts.ingest_mosdac locations
+python -m scripts.ingest_mosdac all --location ESEPL --dry-run
+```
+
 ## Common commands
 
 ```bash

@@ -62,6 +62,9 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "imd_city_forecast",
         "imd_station",
         "imd_station_observation",
+        # MOSDAC solar and wind energy forecasts (Alembic 0009_mosdac)
+        "mosdac_solar_forecast",
+        "mosdac_wind_forecast",
         # WBES PX Dashboard (Alembic 0007_wbes_px)
         "wbes_px_entity_schedule",
         "wbes_px_link_schedule",

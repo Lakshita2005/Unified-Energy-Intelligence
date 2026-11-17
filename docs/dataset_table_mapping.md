@@ -16,6 +16,7 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `RPC` | Regional Power Committees (NRPC, WRPC, SRPC, ERPC, NERPC) | — (no single site) |
 | `WBES` | Grid-India WBES (Web Based Energy Scheduling) | https://newwbes.grid-india.in/ |
 | `IMD` | India Meteorological Department | https://mausam.imd.gov.in/ |
+| `MOSDAC` | MOSDAC (ISRO Space Applications Centre) | https://www.mosdac.gov.in/ |
 
 ## Registered datasets
 
@@ -49,6 +50,8 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `DSM_SETTLEMENT_REGIONAL` | `RPC` | `dsm_settlement` | weekly | weekly | Asia/Kolkata |
 | `IMD_AWS_OBS` | `IMD` | `imd_station`<br>`imd_station_observation` | station observation | intraday | Asia/Kolkata |
 | `IMD_CITY_FORECAST` | `IMD` | `imd_city_forecast` | daily | daily | Asia/Kolkata |
+| `MOSDAC_SOLAR_FORECAST` | `MOSDAC` | `mosdac_solar_forecast` | 15min | irregular (issue time not published) | Asia/Kolkata |
+| `MOSDAC_WIND_FORECAST` | `MOSDAC` | `mosdac_wind_forecast` | 15min | irregular (issue time not published) | Asia/Kolkata |
 
 ### Dataset details
 
@@ -247,6 +250,20 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 - **Endpoint / report:** IMD API (https://api.imd.gov.in/api/v1): GET /cityforecast (optionally ?id=<station code>). Access requires IMD approval and IP whitelisting.
 - **Destination:** `imd_city_forecast`
 - **Notes:** One vintage per published Date (issue time not published). Only forecast fields are loaded; the observed and astronomical fields of the response are kept in raw storage.
+
+#### `MOSDAC_SOLAR_FORECAST` — MOSDAC solar energy forecast (air temperature, solar flux) per location
+
+- **Source:** `MOSDAC`
+- **Endpoint / report:** MOSDAC energy API: GET https://mosdac.gov.in/apienergy/solar?lat=<latitude>&lon=<longitude>. Live 2026-11-17: a JSON list of {time 'DD-MM-YY HHMM' (IST), temp, flux} with string values; 289 points, 15-minute spacing, 72 hours.
+- **Destination:** `mosdac_solar_forecast`
+- **Notes:** temp = air temperature (degC) and flux = solar flux (W/m2) per the supplied endpoint description; flux is NOT GHI and no DNI/DHI/GTI is derived. The live series ended before retrieval (stale).
+
+#### `MOSDAC_WIND_FORECAST` — MOSDAC wind energy forecast (speed, direction) per location
+
+- **Source:** `MOSDAC`
+- **Endpoint / report:** MOSDAC energy API: GET https://mosdac.gov.in/apienergy/wind?lat=<latitude>&lon=<longitude>. Expected {time 'DD-MM-YY HHMM' (IST), speed, direction}; returned HTTP 500 on its only live test (2026-11-17).
+- **Destination:** `mosdac_wind_forecast`
+- **Notes:** Speed and direction units are NOT verified; values are stored as published in neutral *_value columns.
 
 ## Pending datasets (not registered)
 

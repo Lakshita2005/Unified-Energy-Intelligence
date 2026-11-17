@@ -42,6 +42,9 @@ SOURCES: dict[str, SourceDefinition] = {
         SourceDefinition("WBES", "Grid-India WBES (Web Based Energy Scheduling)", "https://newwbes.grid-india.in/"),
         # India Meteorological Department API platform (access by IMD approval and IP whitelisting).
         SourceDefinition("IMD", "India Meteorological Department", "https://mausam.imd.gov.in/"),
+        # ISRO Space Applications Centre's MOSDAC energy forecast API (solar / wind per lat-lon). Its data
+        # guidelines forbid resale/redistribution of downloaded products; business use is by agreement.
+        SourceDefinition("MOSDAC", "MOSDAC (ISRO Space Applications Centre)", "https://www.mosdac.gov.in/"),
     )
 }
 
@@ -370,10 +373,33 @@ DATASETS: tuple[CatalogDataset, ...] = (
         notes="One vintage per published Date (issue time not published). Only forecast fields are loaded; the "
               "observed and astronomical fields of the response are kept in raw storage.",
     ),
+    # ------------------------------------------------------------------ MOSDAC
+    # Tables from Alembic 0009_mosdac (applied 2026-11-17). Not a confirmed replacement for IMD.
+    _dataset(
+        "MOSDAC", "MOSDAC_SOLAR_FORECAST", "MOSDAC solar energy forecast (air temperature, solar flux) per location",
+        "MOSDAC energy API: GET https://mosdac.gov.in/apienergy/solar?lat=<latitude>&lon=<longitude>. Live "
+        "2026-11-17: a JSON list of {time 'DD-MM-YY HHMM' (IST), temp, flux} with string values; 289 points, "
+        "15-minute spacing, 72 hours.",
+        "15min", "irregular (issue time not published)", ("mosdac_solar_forecast",),
+        notes="temp = air temperature (degC) and flux = solar flux (W/m2) per the supplied endpoint description; "
+              "flux is NOT GHI and no DNI/DHI/GTI is derived. The live series ended before retrieval (stale).",
+    ),
+    _dataset(
+        "MOSDAC", "MOSDAC_WIND_FORECAST", "MOSDAC wind energy forecast (speed, direction) per location",
+        "MOSDAC energy API: GET https://mosdac.gov.in/apienergy/wind?lat=<latitude>&lon=<longitude>. Expected "
+        "{time 'DD-MM-YY HHMM' (IST), speed, direction}; returned HTTP 500 on its only live test (2026-11-17).",
+        "15min", "irregular (issue time not published)", ("mosdac_wind_forecast",),
+        notes="Speed and direction units are NOT verified; values are stored as published in neutral *_value "
+              "columns.",
+    ),
 )
 
 # The IMD entries of DATASETS (used by the IMD pipelines).
 IMD_DATASETS: tuple[CatalogDataset, ...] = tuple(entry for entry in DATASETS if entry.source_code == "IMD")
+
+# The MOSDAC source and entries of DATASETS (used by the MOSDAC pipelines).
+MOSDAC_SOURCE: SourceDefinition = SOURCES["MOSDAC"]
+MOSDAC_DATASETS: tuple[CatalogDataset, ...] = tuple(entry for entry in DATASETS if entry.source_code == "MOSDAC")
 
 PENDING_DATASETS: tuple[PendingDataset, ...] = (
     PendingDataset(
