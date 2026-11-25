@@ -236,6 +236,9 @@ def _state_column(text: str) -> str | None:
         return "energy_met_mu"
     if t.startswith("DRAWAL"):
         return "drawal_schedule_mu"
+    if t.startswith("ACE") and "MAX" in t:
+        # From report date 2026-11-18: "ACE²(Max) +ve/ -ve (MW)", footnote "²Area Control Error".
+        return "max_ace"
     if t.startswith("MAXOD") or (t.startswith("MAX") and "OD" in t):
         return "max_od_ud"
     if t.startswith("OD(+)/UD(-)"):
@@ -246,7 +249,17 @@ def _state_column(text: str) -> str | None:
 
 
 REQUIRED_STATE_COLUMNS = frozenset({"max_demand_met_mw", "energy_met_mu", "drawal_schedule_mu", "od_ud_mu",
-                                    "shortage_at_max_demand_mw", "energy_shortage_mu", "max_od_ud"})
+                                    "shortage_at_max_demand_mw", "energy_shortage_mu"})
+
+# The eighth column of sections C and J. Exactly one of the two must be present:
+#   OD_UD - "Max OD(+)/ UD(-) (MW)" (older: "Max OD (MW)"), up to report date 2026-11-17;
+#   ACE   - "ACE²(Max) +ve/ -ve (MW)", Area Control Error, from report date 2026-11-18.
+# ACE is a different measure from maximum over/under-drawal, so it is never written to max_od_mw / max_ud_mw:
+# those stay NULL and the ACE pair is kept in the record's raw data (and in the raw workbook). Columns for it
+# are prepared in migration 0010_grid_state_ace (not applied).
+LAYOUT_OD_UD = "OD_UD"
+LAYOUT_ACE = "ACE"
+PEAK_COLUMNS = {"max_od_ud": LAYOUT_OD_UD, "max_ace": LAYOUT_ACE}
 
 
 @dataclass
@@ -254,10 +267,14 @@ class StatesResult:
     records: list[ParsedRecord] = field(default_factory=list)
     failures: list[ParseFailure] = field(default_factory=list)
     region_label_mismatches: list[str] = field(default_factory=list)
+    layouts: dict[str, str] = field(default_factory=dict)   # section ("C", "J") -> LAYOUT_OD_UD / LAYOUT_ACE
 
 
 def _split_max_od_ud(value: Any) -> tuple[Decimal | None, Decimal | None]:
-    """'631/ -686' -> (631, -686); a single number (older layout, 'Max OD (MW)') -> (value, None)."""
+    """'631/ -686' -> (631, -686); a single number (older layout, 'Max OD (MW)') -> (value, None).
+
+    Also used for the ACE column, which has the same 'positive/ negative' format ('1772/ -433').
+    """
     if isinstance(value, float):
         return to_decimal(value, 3), None
     text = clean(value)
@@ -283,8 +300,15 @@ def parse_states_table(grid: Grid, rows: range, *, section: str, report_date: da
     missing = REQUIRED_STATE_COLUMNS - set(columns)
     if missing:
         raise InvalidWorkbookError(f"section {section} columns not found: {sorted(missing)}")
+    peak = sorted(k for k in PEAK_COLUMNS if k in columns)
+    if len(peak) != 1:
+        raise InvalidWorkbookError(
+            f"section {section}: expected exactly one of the 'Max OD(+)/UD(-) (MW)' (max_od_ud) or "
+            f"'ACE (Max) +ve/-ve (MW)' (max_ace) columns, found {peak or 'neither'}")
+    peak_column = peak[0]
+    layout = PEAK_COLUMNS[peak_column]
 
-    result = StatesResult()
+    result = StatesResult(layouts={section: layout})
     for r in rows:
         if r <= header:
             continue
@@ -300,7 +324,13 @@ def parse_states_table(grid: Grid, rows: range, *, section: str, report_date: da
             result.region_label_mismatches.append(f"{name}: listed under {region_label}, reference region "
                                                   f"{area.region_code}")
         try:
-            max_od, max_ud = _split_max_od_ud(grid.cell(r, columns["max_od_ud"]))
+            if layout == LAYOUT_OD_UD:
+                max_od, max_ud = _split_max_od_ud(grid.cell(r, columns[peak_column]))
+            else:
+                max_od = max_ud = None   # not published in this layout; ACE is never mapped here
+                ace_positive, ace_negative = _split_max_od_ud(grid.cell(r, columns[peak_column]))
+                raw["ace_max_positive_mw"] = None if ace_positive is None else str(ace_positive)
+                raw["ace_max_negative_mw"] = None if ace_negative is None else str(ace_negative)
             values = {
                 "area_code": area.area_code if area else None,
                 "area_name": name,
@@ -337,6 +367,7 @@ def parse_states(workbook: Workbook) -> tuple[StatesResult, bool]:
         result.records += j.records
         result.failures += j.failures
         result.region_label_mismatches += j.region_label_mismatches
+        result.layouts.update(j.layouts)
     return result, has_j
 
 

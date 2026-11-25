@@ -53,6 +53,7 @@ from src.pipelines.grid_india import api
 from src.pipelines.grid_india.entities import EXPECTED_SECTION_C, REGION_HEADINGS
 from src.pipelines.grid_india.errors import InvalidWorkbookError
 from src.pipelines.grid_india.parse_psp import (
+    LAYOUT_ACE,
     TIMESERIES_FIRST_PUBLISHED,
     parse_timeseries,
     CROSSBORDER_FIRST_PUBLISHED,
@@ -254,6 +255,18 @@ class StatesPipeline(_PspSectionPipeline):
         for mismatch in result.region_label_mismatches:
             issues.append(DataQualityIssue(self.target_table, "REGION_LABEL_MISMATCH", f"{day}: {mismatch}",
                                            Severity.WARNING, str(day)))
+        ace_sections = sorted(s for s, layout in result.layouts.items() if layout == LAYOUT_ACE)
+        if ace_sections:
+            # One per workbook: the ACE measure has no column yet (migration 0010_grid_state_ace, not applied).
+            with_ace = sum(1 for r in result.records if r.raw.get("ace_max_positive_mw") is not None
+                           or r.raw.get("ace_max_negative_mw") is not None)
+            issues.append(DataQualityIssue(
+                self.target_table, "ACE_NOT_STORED",
+                f"{document.document_name or day}: section(s) {'+'.join(ace_sections)} on {day} publish "
+                f"'ACE (Max) +ve/-ve (MW)' (Area Control Error) instead of 'Max OD(+)/UD(-) (MW)'. "
+                f"max_od_mw/max_ud_mw stored NULL; the ACE values of {with_ace} area(s) are kept in the record raw "
+                f"data and the raw workbook, not in the table (columns: migration 0010_grid_state_ace).",
+                Severity.WARNING, f"{day}|ACE"))
         if has_j:
             issues.extend(self._bulk_consumer_checks(result.records, day))
         return issues

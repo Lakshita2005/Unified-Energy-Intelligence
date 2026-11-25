@@ -23,6 +23,8 @@ NLDC's Daily Power Supply Position (PSP) workbook, loaded into PostgreSQL schema
 | CrossBorder → `grid_crossborder_market_schedule` | ✅ milestone 6, live-verified 2026-11-13 |
 | Alembic `0006_grid_scada_instant_comment` (comment on `grid_15min_scada.interval_start`) | ✅ applied after a rolled-back dry run (11/11 checks) |
 | TimeSeries → `grid_15min_scada` | ✅ milestone 7, live-verified 2026-11-14 |
+| Sections C + J: ACE layout from report date 2026-11-18 (option B: max OD/UD NULL, ACE kept in raw, `ACE_NOT_STORED`) | ✅ implemented 2026-11-25; not yet loaded |
+| Alembic `0010_grid_state_ace` (`max_ace_pos_mw`, `max_ace_neg_mw` on `grid_state_power_supply`, option A) | prepared 2026-11-25, **not applied** (needs the table owner; see [ACE](#ace-layout-from-report-date-2026-11-18)) |
 | Pre-2023 PDF reports | deferred (G4) |
 | Tests | 88 unit + 53 integration (synthetic workbooks, mocked HTTP, real schema in rolled-back transactions) |
 | Scheduling | not configured |
@@ -106,8 +108,27 @@ download each workbook ONCE ──► raw .xls (write-once, SHA-256, listing ent
 | `energy_met_mu` | Energy Met (MU) |
 | `drawal_schedule_mu` | Drawal Schedule (MU) (negative for DVC) |
 | `od_ud_mu` | OD(+)/UD(−) (MU) |
-| `max_od_mw`, `max_ud_mw` | "Max OD(+)/UD(−) (MW)" `631/ -686` → 631, −686; older single "Max OD (MW)" → `max_od_mw` only |
+| `max_od_mw`, `max_ud_mw` | "Max OD(+)/UD(−) (MW)" `631/ -686` → 631, −686; older single "Max OD (MW)" → `max_od_mw` only. **NULL from report date 2026-11-18** (ACE layout, below) |
 | `energy_shortage_mu` | Energy Shortage (MU) |
+
+#### ACE layout (from report date 2026-11-18)
+
+The eighth column of sections C and J changed on report date 2026-11-18 (workbook `18.11.26_NLDC_PSP_102.xls`; 17-Nov still had the old column). It is now headed "ACE²(Max) +ve/ -ve (MW)", with the footnote "²Area Control Error" on `MOP_E1`. The cell format is unchanged (`1772/ -433`), but it is a **different measure** from maximum over/under-drawal. For example, Rajasthan was 329/−3513 (max OD/UD) on 17-Nov and 1798/−935 (ACE) on 18-Nov.
+
+**Layout check:** each table must have exactly one of the two columns. A table with both or neither fails the section, so nothing is ever mapped by position. The layout is recorded per section (`StatesResult.layouts`), so section C and section J can differ.
+
+**Option B (in force):**
+- `max_od_mw` and `max_ud_mw` are stored NULL, and ACE is never written to them.
+- The ACE pair is kept in the record's raw data, as `ace_max_positive_mw` / `ace_max_negative_mw` (text) plus the published cell `max_ace`. It is also kept in the raw workbook under `RAW_DATA_DIR`.
+- One `ACE_NOT_STORED` WARNING is recorded per workbook, naming the sections and the number of areas.
+- Accepted records' raw data is not written to the database. The raw workbook is the persisted copy.
+
+**Option A (prepared, not applied):**
+- Migration `0010_grid_state_ace` adds `max_ace_pos_mw` and `max_ace_neg_mw` (`numeric(16,3)`, nullable, commented). Its downgrade refuses while either column holds values.
+- **Privileges:** `grid_state_power_supply` is owned by `postgres`, and `pi_app` cannot ALTER it. Apply the migration with the schema owner, after a rolled-back dry run.
+- **Once it is applied:**
+  1. extend the parser to emit the two columns in the ACE layout;
+  2. re-parse report dates from 2026-11-18 with `--reprocess`. The rows gain ACE values as new versions with the same availability.
 
 **Areas** (`src/pipelines/grid_india/entities.py`, exact matching; unknown names are rejected as `UNMAPPED_ENTITY`):
 
@@ -293,6 +314,8 @@ Columns (`contract_type`, `power_exchange`). The categories changed on **2023-10
 | Unknown extra label in section A | `UNKNOWN_LABEL` WARNING (not loaded, not guessed) |
 | Non-numeric value in a row | `PARSE_ERROR`; record rejected, run PARTIAL |
 | Unknown area name | `UNMAPPED_ENTITY` ERROR; rejected and written to the rejects file |
+| Section C/J publishes ACE instead of max OD/UD (from report date 2026-11-18) | `ACE_NOT_STORED` WARNING, one per workbook; max OD/UD NULL, ACE kept in raw |
+| Section C/J with both or neither of the max OD/UD and ACE columns | that section's run FAILED (never mapped by position) |
 | Negative demand / energy / shortage | `OUT_OF_RANGE` ERROR |
 | Regional sums / bulk-consumer sums differ from published totals | `TOTAL_MISMATCH` WARNING (both values in the text) |
 | Day with no workbook listed | `MISSING_DAY` in each section's run (INFO for yesterday, WARNING older) |
@@ -495,4 +518,5 @@ The region and state reference rows (seeded by `python -m scripts.ingest_cea ref
 - **TimeSeries:** all-India only (regional 15-minute SCADA was not found publicly); values are instantaneous, not averages; telemetry-loss zeros are stored as published and flagged.
 - **CrossBorder header changes:** a new contract category, exchange or country label fails the section or is rejected until the reference / known layouts are extended deliberately; nothing is mapped by position.
 - **Misfiled listing entry:** `24.02.26_NLDC_PSP_409.xls` (report date 2026-02-24) is listed only under FY 2024-25 month 02, so the neighbouring-month listing does not see it. It is byte-identical to `24.02.26_NLDC_PSP_573.xls`, so no data is lost; it is the only misfiled entry in 2023-01..2026-11 (affects every section; not changed).
+- **States ACE (from report date 2026-11-18):** not stored in the table until migration `0010_grid_state_ace` is applied by the schema owner. Until then it is kept in the raw workbook, with max OD/UD NULL and `ACE_NOT_STORED` warnings.
 - **International line roster:** a new or renamed international line is rejected (`UNMAPPED_COUNTRY`) until its exact name is added to `INTERNATIONAL_LINES`; it is never guessed.

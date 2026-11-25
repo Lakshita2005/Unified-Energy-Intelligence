@@ -87,10 +87,24 @@ def _area_rows(rows: list[AreaRow]) -> list[list[Any]]:
              a.energy_shortage] for a in rows]
 
 
-def _state_header(shortage_label: str = "Shortage at") -> list[list[Any]]:
-    return [["", "", "Max.Demand", shortage_label, "Energy Met", "Drawal", "OD(+)/UD(-)", "Max", "Energy"],
+# Eighth-column header (upper, lower) per layout, as published. "ace" is the layout from report date 2026-11-18.
+PEAK_HEADERS: dict[str, tuple[str, str]] = {
+    "od_ud": ("Max", "OD(+)/ UD(-) (MW)"),
+    "ace": ("ACE²(Max)", "+ve/ -ve  (MW)"),
+    "neither": ("Remarks", "(text)"),
+}
+
+
+def _state_header(shortage_label: str = "Shortage at", peak_layout: str = "od_ud") -> list[list[Any]]:
+    """Two header rows of section C / J. ``peak_layout="both"`` adds the ACE column after the OD/UD one."""
+    upper, lower = PEAK_HEADERS["od_ud" if peak_layout == "both" else peak_layout]
+    rows = [["", "", "Max.Demand", shortage_label, "Energy Met", "Drawal", "OD(+)/UD(-)", upper, "Energy"],
             ["Region", "States", "Met during the day (MW)¹", "Maximum Demand (MW)", "(MU)", "Schedule (MU)", "(MU)",
-             "OD(+)/ UD(-) (MW)", "Shortage (MU)"]]
+             lower, "Shortage (MU)"]]
+    if peak_layout == "both":
+        rows[0].append(PEAK_HEADERS["ace"][0])
+        rows[1].append(PEAK_HEADERS["ace"][1])
+    return rows
 
 
 def workbook_bytes(report_date: date, *, section_a: list | None = None, section_c: list[AreaRow] | None = None,
@@ -107,12 +121,15 @@ def workbook_bytes(report_date: date, *, section_a: list | None = None, section_
                    section_d_override: dict[str, float] | None = None,
                    intl_heading_convention: str = "Import(+ve)/Export(-ve)",
                    cb: dict[str, Any] | None = None, with_cb: bool | None = None,
-                   ts: dict[str, Any] | None = None, with_ts: bool | None = None) -> bytes:
+                   ts: dict[str, Any] | None = None, with_ts: bool | None = None,
+                   peak_layout: str = "od_ud", j_peak_layout: str | None = None) -> bytes:
     """A Daily PSP workbook for operating day ``report_date`` (Date of Reporting = D+1).
 
     The CrossBorder sheet is included from 2023-07-06 (as published) unless ``with_cb`` says otherwise or
     ``omit_section="CB"``; ``cb`` holds keyword arguments for :func:`crossborder_rows`. Likewise TimeSeries from
     2024-11-04 (``with_ts``, ``omit_section="TS"``, ``ts`` for :func:`timeseries_rows`).
+    ``peak_layout`` / ``j_peak_layout`` choose the eighth column of sections C / J ("od_ud", "ace", "both",
+    "neither"; J follows C unless set).
     """
     section_a = SECTION_A if section_a is None else section_a
     reporting = report_date + timedelta(days=1)
@@ -135,7 +152,7 @@ def workbook_bytes(report_date: date, *, section_a: list | None = None, section_
     rows.append(["All India", 0.05, 0.0, 1.6, 6.2, 7.8, 71.6, 20.5])
     if omit_section != "C":
         rows.append(["C. Power Supply Position in States"])
-        rows += _state_header()
+        rows += _state_header(peak_layout=peak_layout)
         rows += _area_rows(section_c if section_c is not None else default_section_c())
     rows.append([""])
     rows.append(["D. Transnational Exchanges (MU) - Import(+ve)/Export(-ve)"])
@@ -155,7 +172,7 @@ def workbook_bytes(report_date: date, *, section_a: list | None = None, section_
     _write(book.add_sheet("MOP_E"), rows)
     if with_j:
         j_rows: list[list[Any]] = [[""], ["J. Power Supply Position of ISTS Bulk Consumers"], [""]]
-        j_rows += _state_header("Shortage during")
+        j_rows += _state_header("Shortage during", peak_layout=j_peak_layout or peak_layout)
         j_rows += _area_rows(section_j if section_j is not None else default_section_j())
         j_rows += [[""], ["Executive Director-NLDC"]]
         _write(book.add_sheet("MOP_E1"), j_rows)
