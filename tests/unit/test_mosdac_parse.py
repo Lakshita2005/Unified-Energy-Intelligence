@@ -147,6 +147,21 @@ def test_non_numeric_value_rejects_the_record(bad) -> None:
     assert len(result.records) == 2 and len(result.failures) == 1
 
 
+def test_parse_failure_keeps_raw_record_and_description_in_their_own_fields() -> None:
+    records = solar_records(3)
+    records[1]["temp"] = "abc"                       # non-numeric value
+    records[2]["time"] = "99-99-99 9999"             # invalid timestamp
+    result = parse_series(records, SOLAR, LOC, RETRIEVED)
+
+    assert len(result.records) == 1 and len(result.failures) == 2
+    value_failure, time_failure = result.failures
+    assert value_failure.raw == records[1]                       # the original source record, unchanged
+    assert isinstance(value_failure.description, str)
+    assert value_failure.description.startswith("solar: ") and "temp" in value_failure.description
+    assert time_failure.raw == records[2]
+    assert time_failure.description.startswith("solar: ") and "99-99-99 9999" in time_failure.description
+
+
 def test_unexpected_fields_are_reported() -> None:
     records = solar_records(2)
     records[0]["humidity"] = "55"

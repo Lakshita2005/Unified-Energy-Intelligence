@@ -186,7 +186,7 @@ def parse_series(payload: Any, spec: SeriesSpec, location: Location, retrieved_a
                 if values[column] is None:
                     missing_value.setdefault(source_key, []).append(key)
         except ValueError as exc:
-            result.failures.append(ParseFailure(key, f"{spec.kind}: {exc}", item))
+            result.failures.append(ParseFailure(key, item, f"{spec.kind}: {exc}"))
             continue
         for column, (low, high) in spec.plausible.items():
             value = values.get(column)
