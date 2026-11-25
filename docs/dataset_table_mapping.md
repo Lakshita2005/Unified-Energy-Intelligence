@@ -41,6 +41,9 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 | `IEX_DAM` | `IEX` | `iex_market_price` | 15min | daily | Asia/Kolkata |
 | `IEX_GDAM` | `IEX` | `iex_market_price` | 15min | daily | Asia/Kolkata |
 | `IEX_RTM` | `IEX` | `iex_market_price` | 15min | intraday (half-hourly sessions) | Asia/Kolkata |
+| `IEX_DAM_SNAPSHOT` | `IEX` | `iex_market_snapshot` | 15min | daily | Asia/Kolkata |
+| `IEX_GDAM_SNAPSHOT` | `IEX` | `iex_market_snapshot` | 15min | daily | Asia/Kolkata |
+| `IEX_RTM_SNAPSHOT` | `IEX` | `iex_market_snapshot` | 15min | intraday (half-hourly sessions) | Asia/Kolkata |
 | `WBES_PX_REGION` | `WBES` | `wbes_px_region_schedule` | 15min | intraday | Asia/Kolkata |
 | `WBES_PX_LINK` | `WBES` | `wbes_px_link_schedule` | 15min | intraday | Asia/Kolkata |
 | `WBES_PX_ENTITY` | `WBES` | `wbes_px_entity_schedule` | 15min | intraday | Asia/Kolkata |
@@ -187,6 +190,27 @@ Values marked `PENDING_CONFIRMATION` have not been verified against the publishe
 - **Endpoint / report:** IEX API: https://www.iexindia.com/api/v1/rtm/market-snapshot?interval=ONE_FOURTH_HOUR&fromDate={DD-MM-YYYY}&toDate={DD-MM-YYYY}. Page: https://www.iexindia.com/market-data/real-time-market/market-snapshot
 - **Destination:** `iex_market_price`
 - **Notes:** 15-minute data from 2020-06-01. MCP only (area MKT): the rtm/area-price endpoint returned no rows for any bid area. The current day fills in as sessions clear.
+
+#### `IEX_DAM_SNAPSHOT` — IEX Day-Ahead Market (DAM) market snapshot volumes and congestion
+
+- **Source:** `IEX`
+- **Endpoint / report:** Same IEX API response as IEX_DAM: https://www.iexindia.com/api/v1/dam/market-snapshot?interval=ONE_FOURTH_HOUR&fromDate={DD-MM-YYYY}&toDate={DD-MM-YYYY}. Purchase bid, sell bid, MCV, final scheduled volume (MW) and the congestion flag.
+- **Destination:** `iex_market_snapshot`
+- **Notes:** Loaded from the raw document fetched by the price run (no second request); history backfilled from stored raw files. The price itself is in iex_market_price (area MKT).
+
+#### `IEX_GDAM_SNAPSHOT` — IEX Green Day-Ahead Market (G-DAM) market snapshot volumes and congestion
+
+- **Source:** `IEX`
+- **Endpoint / report:** Same IEX API response as IEX_GDAM: https://www.iexindia.com/api/v1/gdam/market-snapshot?interval=ONE_FOURTH_HOUR&fromDate={DD-MM-YYYY}&toDate={DD-MM-YYYY}. Purchase bid, sell bid, MCV, final scheduled volume (MW) and the congestion flag; per-source sell bid, MCV and cleared volume (solar/non-solar/hydro to 2026-07-07, hydro/wind/other RE/DRE from 2026-07-08).
+- **Destination:** `iex_market_snapshot`
+- **Notes:** Loaded from the raw document fetched by the price run (no second request); history backfilled from stored raw files. The price itself is in iex_market_price (area MKT).
+
+#### `IEX_RTM_SNAPSHOT` — IEX Real-Time Market (RTM) market snapshot volumes and congestion
+
+- **Source:** `IEX`
+- **Endpoint / report:** Same IEX API response as IEX_RTM: https://www.iexindia.com/api/v1/rtm/market-snapshot?interval=ONE_FOURTH_HOUR&fromDate={DD-MM-YYYY}&toDate={DD-MM-YYYY}. Purchase bid, sell bid, MCV, final scheduled volume (MW) and the congestion flag.
+- **Destination:** `iex_market_snapshot`
+- **Notes:** Loaded from the raw document fetched by the price run (no second request); history backfilled from stored raw files. The price itself is in iex_market_price (area MKT).
 
 #### `WBES_PX_REGION` — WBES PX Dashboard - region-wise injection / drawal
 

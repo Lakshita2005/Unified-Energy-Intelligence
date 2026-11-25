@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
 from config.settings import Settings
@@ -29,8 +29,10 @@ from src.common.raw_storage import LocalFileSystemBackend, RawStorageManager
 from src.ingestion.models import RunStatus
 from src.loaders.table_loader import TableLoader
 from src.pipelines.iex import api
+from src.pipelines.iex.area_states import ROWS as AREA_STATE_ROWS
+from src.pipelines.iex.area_states import seed_area_states
 from src.pipelines.iex.reference import AREA_ROWS, MARKET_ROWS, missing_reference, seed_reference
-from src.pipelines.iex.runner import RunSummary, run_iex
+from src.pipelines.iex.runner import RunSummary, backfill_snapshots, run_iex
 from tests.support.iex import DAY, MockIex, area_prices, dam_record, envelope, router, snapshot
 
 pytestmark = pytest.mark.integration
@@ -119,6 +121,42 @@ def test_dam_end_to_end_mcp_and_13_bid_areas(conn: Connection, settings: Setting
                        {"r": r.ingestion_run_id}).one()
     assert (run.run_status, run.records_inserted, run.dataset_code) == ("SUCCESS", 1344, "IEX_DAM")
     assert run.parameters["areas"] == ["MKT", *api.BID_AREAS]
+
+
+def _snapshot_table(conn: Connection) -> bool:
+    return inspect(conn).has_table("iex_market_snapshot", schema="pi")
+
+
+def test_snapshot_volumes_follow_the_price_run(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    mock = MockIex(router(snapshot("gdam")))
+
+    summary = _run(conn, settings, storage, mock, kind="gdam")
+
+    assert len(mock.requests) == 14                                    # no extra request for the volumes
+    if not _snapshot_table(conn):
+        assert summary.snapshot is None and "0013_iex_market_snapshot" in summary.snapshot_skipped
+        assert summary.ok
+        return
+    s = summary.snapshot
+    assert s.status is RunStatus.SUCCESS and (s.documents_processed, s.records_inserted) == (1, 96)
+    assert s.raw_storage_keys == summary.result.raw_storage_keys[:1]  # the price run's stored snapshot file
+    row = conn.execute(text("SELECT * FROM pi.iex_market_snapshot WHERE ingestion_run_id = :r AND time_block = 1"),
+                       {"r": s.ingestion_run_id}).one()
+    assert (row.market_code, row.sell_bid_mw, row.final_scheduled_volume_mw, row.congestion) == \
+        ("IEX_GDAM", Decimal("410.9"), Decimal("385.19"), False)
+    assert row.wind_mcv_mw == Decimal("9.5") and row.solar_mcv_mw is None and row.document_id is not None
+
+
+def test_snapshot_backfill_from_stored_files(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    if not _snapshot_table(conn):
+        pytest.skip("pi.iex_market_snapshot not created (migration 0013_iex_market_snapshot not applied)")
+    _run(conn, settings, storage, MockIex(router(snapshot("rtm"))), kind="rtm")
+
+    backfill = backfill_snapshots("rtm", start_date=DAY, end_date=DAY, settings=settings,
+                                  database=SavepointDatabase(conn), raw_source=storage)
+
+    assert backfill.ok and backfill.result.duplicate_documents == 1    # already loaded by the live run
+    assert backfill.result.records_inserted == 0
 
 
 def test_raw_documents_and_checksums(conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
@@ -339,6 +377,20 @@ def test_reference_seeding_is_idempotent(conn: Connection) -> None:
 
     assert again.inserted == [] and again.differing == []
     assert len(again.unchanged) == len(MARKET_ROWS) + len(AREA_ROWS) == 17
+
+
+def test_area_states_seed_is_idempotent(conn: Connection) -> None:
+    if not inspect(conn).has_table("area_state_map", schema="pi"):
+        pytest.skip("pi.area_state_map not created (migration 0012_area_state_map not applied)")
+
+    seed_area_states(conn, "pi")
+    again = seed_area_states(conn, "pi")
+
+    assert again.inserted == [] and again.differing == [] and again.overlaps == []
+    assert len(again.unchanged) == len(AREA_STATE_ROWS)
+    kerala = conn.execute(text("SELECT area_code FROM pi.area_state_map WHERE state_code = 'KL' "
+                               "AND effective_to IS NULL")).scalar_one()
+    assert kerala == "S3"
 
 
 def test_missing_reference_is_reported(conn: Connection) -> None:

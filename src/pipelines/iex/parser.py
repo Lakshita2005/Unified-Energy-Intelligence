@@ -3,9 +3,9 @@
 Pure: no network or database access.
 
 * Snapshot records give the system-wide unconstrained MCP (``area_code = 'MKT'``):
-  ``mcp`` for DAM and RTM, ``unconstrained_m_c_p`` for GDAM. Volumes and the
-  congestion flag have no column in ``pi.iex_market_price``; they stay in the
-  raw file.
+  ``mcp`` for DAM and RTM, ``unconstrained_m_c_p`` for GDAM. The same records'
+  volumes and congestion flag are parsed separately by
+  :func:`parse_snapshot_volumes` for ``pi.iex_market_snapshot``.
 * Area-price records give one bid area's clearing price, which differs from
   the MCP in congested blocks.
 
@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from src.ingestion.models import ParsedRecord, ParseFailure, ParseResult
-from src.pipelines.iex.api import MKT_AREA, Market
+from src.pipelines.iex.api import GDAM, GDAM_SOURCES, MKT_AREA, Market
 from src.pipelines.iex.errors import EmptyResponseError, IexApiError, InvalidResponseError
 
 _PERIOD = re.compile(r"^(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$")
@@ -104,7 +104,7 @@ def _parse_items(
     expected_fields: Callable[[date], frozenset[str]],
     block_field: str,
     to_block: Callable[[Any], int],
-    price_field: str,
+    measures: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> ParseResult:
     result = ParseResult()
     for item in data:
@@ -125,21 +125,62 @@ def _parse_items(
             continue
         try:
             block = to_block(item[block_field])
-            price = _price(item[price_field])
+            values = measures(item)
         except ValueError as exc:
             result.failures.append(ParseFailure(key, item, str(exc)))
             continue
         result.records.append(ParsedRecord(key=f"{market.market_code}|{area}|{delivery_date}|{block}", raw=item,
-                                           values={
-                                               "market_code": market.market_code,
-                                               "area_code": area,
-                                               "delivery_date": delivery_date,
-                                               "time_block": block,
-                                               "price_inr_per_mwh": price,
-                                               # The API states no publication time.
-                                               "source_published_at": None,
-                                           }))
+                                           values={"market_code": market.market_code, "delivery_date": delivery_date,
+                                                   "time_block": block, **values}))
     return result
+
+
+def _price_values(area: str, price_field: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    # The API states no publication time.
+    return lambda item: {"area_code": area, "price_inr_per_mwh": _price(item[price_field]),
+                         "source_published_at": None}
+
+
+def _congestion(value: Any) -> bool:
+    if value == "YES":
+        return True
+    if value == "NO":
+        return False
+    raise ValueError(f"congestion {value!r} is not 'YES' or 'NO'")
+
+
+def _volume(item: dict[str, Any], name: str) -> Decimal:
+    try:
+        return _price(item[name])
+    except ValueError:
+        raise ValueError(f"{name} {item[name]!r} is not numeric") from None
+
+
+_GDAM_TOTALS = {"sell_bid_mw": "total_sell_bid", "mcv_mw": "total_unconstrained_m_c_v",
+                "final_scheduled_volume_mw": "total_cleared_volume"}
+_DAM_RTM_VOLUMES = {"sell_bid_mw": "sell_bid", "mcv_mw": "mcv", "final_scheduled_volume_mw": "final_scheduled_volume"}
+_GDAM_BREAKDOWN = {"sell_bid": "sell_bid_mw", "unconstrained_m_c_v": "mcv_mw", "cleared_volume": "cleared_volume_mw"}
+
+SNAPSHOT_BREAKDOWN_COLUMNS: tuple[str, ...] = tuple(
+    f"{source}_{column}" for source in GDAM_SOURCES for column in _GDAM_BREAKDOWN.values())
+
+
+def _snapshot_values(market: Market) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    gdam = market.market_code == GDAM.market_code
+
+    def values(item: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {"purchase_bid_mw": _volume(item, "purchase_bid")}
+        result |= {column: _volume(item, name) for column, name in (_GDAM_TOTALS if gdam else _DAM_RTM_VOLUMES).items()}
+        result["congestion"] = _congestion(item["congestion"])
+        result |= dict.fromkeys(SNAPSHOT_BREAKDOWN_COLUMNS)
+        if gdam:
+            for source in GDAM_SOURCES:
+                for kind, column in _GDAM_BREAKDOWN.items():
+                    if f"{source}_{kind}" in item:
+                        result[f"{source}_{column}"] = _volume(item, f"{source}_{kind}")
+        return result
+
+    return values
 
 
 def parse_snapshot(content: bytes, *, market: Market, start: date, end: date) -> ParseResult:
@@ -153,7 +194,24 @@ def parse_snapshot(content: bytes, *, market: Market, start: date, end: date) ->
     """
     return _parse_items(_envelope(content), market=market, area=MKT_AREA, start=start, end=end,
                         expected_fields=market.fields_for, block_field="period", to_block=_block_from_period,
-                        price_field=market.price_field)
+                        measures=_price_values(MKT_AREA, market.price_field))
+
+
+def parse_snapshot_volumes(content: bytes, *, market: Market, start: date, end: date) -> ParseResult:
+    """Parse a ``market-snapshot`` response into volume and congestion records (``pi.iex_market_snapshot``).
+
+    DAM/RTM ``sell_bid``, ``mcv``, ``final_scheduled_volume`` and GDAM ``total_sell_bid``,
+    ``total_unconstrained_m_c_v``, ``total_cleared_volume`` share the columns ``sell_bid_mw``, ``mcv_mw``,
+    ``final_scheduled_volume_mw``. GDAM per-source fields go to ``<source>_sell_bid_mw``, ``<source>_mcv_mw``
+    and ``<source>_cleared_volume_mw``; sources a delivery date does not publish are NULL. The price is not
+    repeated here (it is in ``pi.iex_market_price``, area ``MKT``).
+
+    Raises:
+        The same errors as :func:`parse_snapshot`.
+    """
+    return _parse_items(_envelope(content), market=market, area=MKT_AREA, start=start, end=end,
+                        expected_fields=market.fields_for, block_field="period", to_block=_block_from_period,
+                        measures=_snapshot_values(market))
 
 
 def parse_area_prices(content: bytes, *, market: Market, area: str, start: date, end: date) -> ParseResult:
@@ -165,4 +223,4 @@ def parse_area_prices(content: bytes, *, market: Market, area: str, start: date,
     fields = frozenset({"date", "timeperiod", area.lower()})
     return _parse_items(_envelope(content), market=market, area=area, start=start, end=end,
                         expected_fields=lambda _: fields, block_field="timeperiod", to_block=_block_from_start,
-                        price_field=area.lower())
+                        measures=_price_values(area, area.lower()))

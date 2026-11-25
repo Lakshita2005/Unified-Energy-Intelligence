@@ -57,6 +57,8 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "npp_demand_generation",
         # Markets and weather
         "iex_market_price",
+        "iex_market_snapshot",  # Alembic 0013_iex_market_snapshot
+        "area_state_map",  # Alembic 0012_area_state_map (IEX bid area -> state reference)
         "open_meteo_weather",
         # IMD AWS observations and city forecasts (Alembic 0008_imd)
         "imd_city_forecast",

@@ -48,7 +48,38 @@ No authentication is required. Requests within one run are spaced 0.5 s apart. T
 | `source_published_at` | NULL | The API gives no publication time. Rule-based estimates (such as D-1 13:00) are not stored as source facts. |
 | `ingestion_run_id` | the run | The table has no `document_id`; each response is a separate `source_document` of the run |
 
-**Not stored in the database:** purchase and sell bids, MCV, final scheduled volume, congestion, and the GDAM source breakdowns. `pi.iex_market_price` has no columns for them. They are preserved in the raw files. Storing them would need a new table, which means proposing an Alembic migration first; none has been applied.
+Purchase and sell bids, MCV, final scheduled volume, congestion and the GDAM source breakdowns are not in `pi.iex_market_price`. They go to `pi.iex_market_snapshot` (see below).
+
+## Snapshot volumes and congestion (`pi.iex_market_snapshot`)
+
+Migration `0013_iex_market_snapshot` (prepared, **not applied**; it follows `0012_area_state_map`) adds the table. One row per market × delivery date × block. Natural key `(market_code, delivery_date, time_block)`, VERSION policy. Datasets `IEX_DAM_SNAPSHOT`, `IEX_GDAM_SNAPSHOT`, `IEX_RTM_SNAPSHOT`. Application privileges: `pi_app` gets **SELECT and INSERT only** (the VERSION loader never updates or deletes). The migration revokes the UPDATE and DELETE that the `pi` schema's default privileges would otherwise grant. Migration chain: `0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs`.
+
+| Column | DAM / RTM field | GDAM field |
+|---|---|---|
+| `purchase_bid_mw` | `purchase_bid` | `purchase_bid` |
+| `sell_bid_mw` | `sell_bid` | `total_sell_bid` |
+| `mcv_mw` | `mcv` | `total_unconstrained_m_c_v` |
+| `final_scheduled_volume_mw` | `final_scheduled_volume` | `total_cleared_volume` |
+| `congestion` | `congestion` (YES/NO → boolean) | `congestion` |
+| `<source>_sell_bid_mw`, `<source>_mcv_mw`, `<source>_cleared_volume_mw` | NULL | `<source>_sell_bid`, `<source>_unconstrained_m_c_v`, `<source>_cleared_volume` for solar, non_solar, hydro (to 2026-07-07) and hydro, wind, other_re, dre (from 2026-07-08); NULL when not published |
+
+- Volumes are MW, stored exactly as published (unbounded `numeric`). The price is not repeated; join `iex_market_price` on area `MKT`.
+- **Loading:** after each price run, `run_iex` starts a second run that loads the snapshot document the price run just stored. It makes no second request and writes no second raw file. While the table does not exist, the second run is skipped and the CLI prints why; price ingestion is unaffected.
+- **Rejections:** a non-numeric or missing volume, or a congestion value other than YES/NO, rejects that block's record (`PARSE_ERROR`); a negative volume is `OUT_OF_RANGE`. An unexpected field set still stops the whole document, as for prices.
+- **Never older over newer:** blocks that already have a row retrieved after the document being loaded are not loaded from it (`NEWER_VERSION_STORED`, INFO).
+- **Congestion flag:** stored as published. It is not a complete indicator of market splitting. On DAM 2026-11-07 it is YES for 11 blocks, while MCV differs from FSV in 42 blocks and some area price differs from the MCP in 45. All 11 flagged blocks are among both.
+
+### Backfill from stored raw files
+
+```
+python -m scripts.ingest_iex backfill-snapshot all --dry-run
+python -m scripts.ingest_iex backfill-snapshot all
+```
+
+- Optional `--start-date` / `--end-date` select files whose requested range overlaps those days.
+- No IEX call is made. Every `iex_<market>__mkt__*` file is checked against the size and SHA-256 in its metadata (a mismatch stops the command), replayed in retrieval order, and byte-identical re-fetches are loaded once.
+- One run per market. Content already registered by the snapshot dataset is skipped, so the backfill can be repeated safely.
+- Stored files on 2026-11-25: DAM 3 distinct (2 identical re-fetches), GDAM 2 (1), RTM 2 (1); 4,608 records, all of which parse and pass validation.
 
 **GDAM field change:** GDAM's field set changed with delivery date **2026-07-08**:
 - before: solar / non-solar / hydro;
@@ -62,6 +93,23 @@ Seed the reference rows once with `python -m scripts.ingest_iex reference [--dry
 - It inserts 3 `market_master` and 14 `market_area` rows with `ON CONFLICT DO NOTHING`.
 - Existing rows are never changed; a row with different values is reported.
 - Real runs refuse to start while rows are missing. A dry run seeds them inside its rolled-back transaction.
+
+### Bid area → state (`pi.area_state_map`)
+
+Migration `0012_area_state_map` (prepared, **not applied**; it follows `0010_grid_state_ace`) adds the table. `pi_app` gets **SELECT and INSERT only**: seeding reads and appends, never updates or deletes, and the migration revokes the UPDATE and DELETE granted by the schema's default privileges. After it is applied, seed it with `python -m scripts.ingest_iex area-states [--dry-run]`. Price runs do not use the table.
+- Each row maps a bid area to a state, or to a part of one in `state_part` (Goa and Puducherry are split between areas). Validity is `[effective_from, effective_to)` in delivery dates; `effective_to` NULL means still valid.
+- Every row carries `source_name`, `source_url`, `source_published_on`, `verification_status` and `notes`. **No row is OFFICIAL**: the rows rest on IEX's 2016 table as reproduced in an academic paper, a 2020 Regulatory Assistance Project analysis (Telangana in S1; S2 without Kerala), and a 2024 KSERC order (Kerala in S3). `effective_from` is the earliest date a source shows the mapping, not the date IEX introduced it.
+- Known gap: Kerala has no row from 2019-03-01 to 2020-07-09, between the last source placing it in S2 and the first placing it in S3.
+- Not mapped: Lakshadweep and Andaman & Nicobar (not on the national grid), and `MKT`.
+- Seeding is idempotent and never changes stored rows. It reports rows with different values, and rolls back if any validity periods overlap.
+
+Area of a state on a delivery date:
+
+```sql
+SELECT area_code, state_part FROM pi.area_state_map
+WHERE state_code = 'KL' AND effective_from <= DATE '2026-11-10'
+  AND (effective_to IS NULL OR DATE '2026-11-10' < effective_to);
+```
 
 ## Data quality
 
@@ -109,7 +157,7 @@ python -m scripts.ingest_iex rtm --date 2026-11-12                              
 
 **Allowed dates:** DAM from 2015-01-01, GDAM from 2021-10-27, RTM from 2020-06-01. DAM and GDAM accept up to tomorrow, which is published in the afternoon; RTM accepts up to today.
 
-**Exit codes:** `0` SUCCESS, `1` PARTIAL or FAILED, `2` invalid arguments or missing reference rows.
+**Exit codes:** `0` SUCCESS, `1` PARTIAL or FAILED (the price run or, when it ran, the snapshot run), `2` invalid arguments, missing reference rows or a stored file that fails checksum verification.
 
 ## Live verification record
 
@@ -137,7 +185,7 @@ Checks after the runs:
 - **Terms of use:** see the note at the top.
 - **Undocumented API** behind a bot-protected site: it can change or block requests without notice. Structural changes fail safely, and raw responses are kept.
 - **RTM prices:** MCP only, with no area prices.
-- **Only prices are stored:** volumes and congestion need a schema migration.
+- **Volumes and congestion** are loaded only after migration `0013_iex_market_snapshot` is applied; until then they stay in the raw files.
 - **No publication timestamp** from the source.
 - **Empty responses:** `data: []` is ambiguous.
 - **Revisions:** IEX doesn't document whether or when published values are revised. Any change is kept as a new version.

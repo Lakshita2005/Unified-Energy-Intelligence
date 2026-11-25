@@ -60,6 +60,11 @@ class Market:
     history_start: date
     days_ahead: int
 
+    @property
+    def snapshot_dataset_code(self) -> str:
+        """Catalogue dataset of the snapshot volumes and congestion (``pi.iex_market_snapshot``)."""
+        return f"{self.dataset_code}_SNAPSHOT"
+
     def fields_for(self, delivery_date: date) -> frozenset[str]:
         """The snapshot fields expected for ``delivery_date``."""
         expected = self.snapshot_fields[0][1]
@@ -82,12 +87,15 @@ def _gdam_fields(sources: tuple[str, ...]) -> frozenset[str]:
 # GDAM's volume breakdown changed with delivery date 2026-07-08 (verified on
 # 2026-07-07 and 2026-07-08; the IEX site has "gDamSummaryHeadersAfter8July2026").
 GDAM_FIELDS_CHANGE = date(2026, 7, 8)
+GDAM_SOURCES_BEFORE: tuple[str, ...] = ("solar", "non_solar", "hydro")
+GDAM_SOURCES_AFTER: tuple[str, ...] = ("hydro", "wind", "other_re", "dre")
+GDAM_SOURCES: tuple[str, ...] = ("solar", "non_solar", "hydro", "wind", "other_re", "dre")
 
 DAM = Market("IEX_DAM", "IEX_DAM", "dam", "mcp", ((date(2000, 1, 1), _DAM_RTM_FIELDS),), True,
              date(2015, 1, 1), 1)
 GDAM = Market("IEX_GDAM", "IEX_GDAM", "gdam", "unconstrained_m_c_p",
-              ((date(2000, 1, 1), _gdam_fields(("solar", "non_solar", "hydro"))),
-               (GDAM_FIELDS_CHANGE, _gdam_fields(("hydro", "wind", "other_re", "dre")))),
+              ((date(2000, 1, 1), _gdam_fields(GDAM_SOURCES_BEFORE)),
+               (GDAM_FIELDS_CHANGE, _gdam_fields(GDAM_SOURCES_AFTER))),
               True, date(2021, 10, 27), 1)
 RTM = Market("IEX_RTM", "IEX_RTM", "rtm", "mcp", ((date(2000, 1, 1), _DAM_RTM_FIELDS),), False,
              date(2020, 6, 1), 0)

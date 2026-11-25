@@ -301,6 +301,23 @@ DATASETS: tuple[CatalogDataset, ...] = (
         notes="15-minute data from 2020-06-01. MCP only (area MKT): the rtm/area-price endpoint returned no rows "
               "for any bid area. The current day fills in as sessions clear.",
     ),
+    # The market-snapshot response of IEX_DAM / IEX_GDAM / IEX_RTM also feeds these datasets (documents are
+    # de-duplicated per dataset): volumes and congestion, Alembic 0013_iex_market_snapshot.
+    *(_dataset(
+        "IEX", f"IEX_{kind}_SNAPSHOT", f"IEX {label} market snapshot volumes and congestion",
+        f"Same IEX API response as IEX_{kind}: https://www.iexindia.com/api/v1/{kind.lower()}/market-snapshot?"
+        "interval=ONE_FOURTH_HOUR&fromDate={DD-MM-YYYY}&toDate={DD-MM-YYYY}. Purchase bid, sell bid, MCV, final "
+        f"scheduled volume (MW) and the congestion flag{breakdown}.",
+        "15min", frequency, ("iex_market_snapshot",),
+        notes="Loaded from the raw document fetched by the price run (no second request); history backfilled from "
+              "stored raw files. The price itself is in iex_market_price (area MKT).",
+    ) for kind, label, frequency, breakdown in (
+        ("DAM", "Day-Ahead Market (DAM)", "daily", ""),
+        ("GDAM", "Green Day-Ahead Market (G-DAM)", "daily",
+         "; per-source sell bid, MCV and cleared volume (solar/non-solar/hydro to 2026-07-07, hydro/wind/other "
+         "RE/DRE from 2026-07-08)"),
+        ("RTM", "Real-Time Market (RTM)", "intraday (half-hourly sessions)", ""),
+    )),
     # ------------------------------------------------------------------ WBES
     _dataset(
         "WBES", "WBES_PX_REGION", "WBES PX Dashboard - region-wise injection / drawal",

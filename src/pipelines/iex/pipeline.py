@@ -11,6 +11,14 @@ Each response is a separate raw document and transaction. Duplicate handling
 uses the natural key ``(market_code, area_code, delivery_date, time_block)``
 with :attr:`ConflictPolicy.VERSION`: an unchanged price is skipped, a revised
 price gets a new row tied to the new run (earlier rows are kept).
+
+The snapshot's volumes and congestion flag are loaded by a separate run of
+:class:`IexSnapshotPipeline` (datasets ``IEX_*_SNAPSHOT``, table
+``iex_market_snapshot``, natural key ``(market_code, delivery_date, time_block)``,
+VERSION). It uses the snapshot document the price run stored, or stored raw
+files when backfilling; it never calls IEX. Records for blocks that already have
+a row retrieved after the document are not loaded, so replaying an older file
+never puts its values above newer ones.
 """
 
 from __future__ import annotations
@@ -18,8 +26,12 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import ClassVar
+from typing import Any, ClassVar
 
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+from src.common.raw_storage import StoredObject
 from src.ingestion.base import BaseIngestionPipeline, RunContext
 from src.ingestion.catalog import DATASETS, SOURCES
 from src.ingestion.models import (
@@ -32,9 +44,14 @@ from src.ingestion.models import (
     ValidationIssue,
 )
 from src.ingestion.validation import CompositeValidator, FunctionValidator, NumericRange, RequiredFields, Validator
-from src.loaders.table_loader import ConflictPolicy
+from src.loaders.table_loader import ConflictPolicy, LoadResult
 from src.pipelines.iex import api
-from src.pipelines.iex.parser import parse_area_prices, parse_snapshot
+from src.pipelines.iex.parser import (
+    SNAPSHOT_BREAKDOWN_COLUMNS,
+    parse_area_prices,
+    parse_snapshot,
+    parse_snapshot_volumes,
+)
 
 REQUEST_PAUSE_SECONDS = 0.5  # between consecutive requests of one run, to keep load on IEX low
 
@@ -73,6 +90,16 @@ def _area_of(document: RawDocument) -> str:
     return (document.document_name or "").split("__")[1].upper()
 
 
+def name_range(document_name: str) -> tuple[date, date]:
+    """The requested delivery dates, read back from a document name (see :func:`_document_name`)."""
+    parts = document_name.removesuffix(".json").split("__")
+    return date.fromisoformat(parts[2]), date.fromisoformat(parts[3])
+
+
+def document_range(document: RawDocument) -> tuple[date, date]:
+    return name_range(document.document_name or "")
+
+
 class _IexPipeline(BaseIngestionPipeline):
     """Behaviour shared by the DAM, GDAM and RTM pipelines."""
 
@@ -82,6 +109,17 @@ class _IexPipeline(BaseIngestionPipeline):
     conflict_policy = ConflictPolicy.VERSION
     pipeline_version = "iex-1.0.0"
     market: ClassVar[api.Market]
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # Snapshot documents as stored in raw storage, for the snapshot run that follows.
+        self.snapshot_documents: list[tuple[RawDocument, StoredObject]] = []
+
+    def _store_raw(self, document: RawDocument, context: RunContext) -> StoredObject:
+        stored = super()._store_raw(document, context)
+        if _area_of(document) == api.MKT_AREA:
+            self.snapshot_documents.append((document, stored))
+        return stored
 
     def areas(self) -> list[str]:
         """``MKT`` (from the snapshot) plus the bid areas, if fetched for this market."""
@@ -172,4 +210,96 @@ class IexRtmPipeline(_IexPipeline):
     """Real-Time Market: MCP only (the area-price endpoint returns no RTM data)."""
 
     dataset = _catalog_dataset(api.RTM.dataset_code)
+    market = api.RTM
+
+
+SNAPSHOT_TABLE = "iex_market_snapshot"
+SNAPSHOT_VOLUME_COLUMNS: tuple[str, ...] = ("purchase_bid_mw", "sell_bid_mw", "mcv_mw", "final_scheduled_volume_mw",
+                                            *SNAPSHOT_BREAKDOWN_COLUMNS)
+
+
+def snapshot_validator() -> Validator:
+    """Required totals and congestion, blocks 1-96, and no negative volume."""
+    return CompositeValidator(
+        RequiredFields("market_code", "delivery_date", "time_block", "purchase_bid_mw", "sell_bid_mw", "mcv_mw",
+                       "final_scheduled_volume_mw"),
+        FunctionValidator(lambda r: [] if isinstance(r.values.get("congestion"), bool) else [ValidationIssue(
+            "MISSING_REQUIRED_FIELD", "Required field 'congestion' is missing", Severity.ERROR, "congestion")]),
+        NumericRange("time_block", minimum=1, maximum=api.BLOCKS_PER_DAY),
+        *(NumericRange(column, minimum=0) for column in SNAPSHOT_VOLUME_COLUMNS),
+    )
+
+
+class IexSnapshotPipeline(BaseIngestionPipeline):
+    """Volumes and congestion from already stored ``market-snapshot`` documents (no IEX request)."""
+
+    source = SOURCES["IEX"]
+    target_table = SNAPSHOT_TABLE
+    natural_key = ("market_code", "delivery_date", "time_block")
+    conflict_policy = ConflictPolicy.VERSION
+    pipeline_version = "iex-snapshot-1.0.0"
+    market: ClassVar[api.Market]
+
+    def __init__(self, *, documents: list[tuple[RawDocument, StoredObject]], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.documents = list(documents)
+        self._stored = {id(document): stored for document, stored in self.documents}
+
+    def fetch(self, context: RunContext) -> list[RawDocument]:
+        return [document for document, _ in self.documents]
+
+    def _store_raw(self, document: RawDocument, context: RunContext) -> StoredObject:
+        stored = self._stored[id(document)]
+        context.log.info("Using stored IEX snapshot %s (sha256=%s)", stored.key, stored.sha256)
+        return stored
+
+    def raw_storage_partition(self, document: RawDocument, context: RunContext) -> str | None:
+        start, end = document_range(document)
+        return f"{api.MKT_AREA.lower()}_{start}_{end}"
+
+    def parse(self, document: RawDocument, context: RunContext) -> ParseResult:
+        start, end = document_range(document)
+        return parse_snapshot_volumes(document.content, market=self.market, start=start, end=end)
+
+    def validator(self) -> Validator:
+        return snapshot_validator()
+
+    def _blocks_with_newer_rows(self, connection: Connection, document: RawDocument) -> set[tuple[date, int]]:
+        start, end = document_range(document)
+        rows = connection.execute(text(
+            f"SELECT delivery_date, time_block FROM {self.settings.db_schema}.{self.target_table} "
+            "WHERE market_code = :m AND delivery_date BETWEEN :a AND :b "
+            "GROUP BY delivery_date, time_block HAVING max(retrieved_at) > :r"),
+            {"m": self.market.market_code, "a": start, "b": end, "r": document.retrieved_at})
+        return {(row.delivery_date, row.time_block) for row in rows}
+
+    def _load_document(self, connection: Connection, document: RawDocument, context: RunContext, document_id: int,
+                       accepted: list[tuple[ParsedRecord, list[ValidationIssue]]], issues: list[DataQualityIssue],
+                       *args: Any, **kwargs: Any) -> LoadResult:
+        newer = self._blocks_with_newer_rows(connection, document)
+        fresh = [(record, record_issues) for record, record_issues in accepted
+                 if (record.values["delivery_date"], record.values["time_block"]) not in newer]
+        skipped = len(accepted) - len(fresh)
+        if skipped:
+            issues.append(DataQualityIssue(
+                self.target_table, "NEWER_VERSION_STORED",
+                f"{self.market.market_code}: {skipped} block(s) not loaded from this document; rows retrieved after "
+                f"{document.retrieved_at.isoformat()} are already stored", Severity.INFO, document.document_name))
+        load = super()._load_document(connection, document, context, document_id, fresh, issues, *args, **kwargs)
+        load.unchanged += skipped
+        return load
+
+
+class IexDamSnapshotPipeline(IexSnapshotPipeline):
+    dataset = _catalog_dataset(api.DAM.snapshot_dataset_code)
+    market = api.DAM
+
+
+class IexGdamSnapshotPipeline(IexSnapshotPipeline):
+    dataset = _catalog_dataset(api.GDAM.snapshot_dataset_code)
+    market = api.GDAM
+
+
+class IexRtmSnapshotPipeline(IexSnapshotPipeline):
+    dataset = _catalog_dataset(api.RTM.snapshot_dataset_code)
     market = api.RTM
