@@ -77,6 +77,16 @@ Hourly forecast and historical weather for configured locations into
 `pi.open_meteo_weather`. Locations go in `config/weather_locations.toml`
 (copy the `.example.toml`). Full details: `docs/open_meteo_pipeline.md`.
 
+**Licence and usage (free plan, `OPEN_METEO_PLAN=free`, the default):** the free endpoint
+`https://api.open-meteo.com/v1/forecast` needs no API key and may be used for **non-commercial purposes
+only**, with fewer than **10,000 API calls a day**. Keep `OPEN_METEO_API_KEY` empty: with a key, the
+pipeline switches to the paid `customer-` hosts, so the scheduler refuses that combination unless
+`OPEN_METEO_PLAN=commercial`. A commercial plan needs a paid subscription and its own key.
+
+**Attribution:** Open-Meteo data is licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Anything that shows or shares it must credit
+"Weather data by [Open-Meteo.com](https://open-meteo.com/)" (CC BY 4.0) and say if the data was changed.
+
 ```bash
 python -m scripts.ingest_open_meteo locations
 python -m scripts.ingest_open_meteo forecast --location SITE_CODE --dry-run
@@ -187,6 +197,35 @@ Migration `0009_mosdac` is applied and both datasets are registered; no ingestio
 ```bash
 python -m scripts.ingest_mosdac locations
 python -m scripts.ingest_mosdac all --location ESEPL --dry-run
+```
+
+## Scheduler and worker (availability-based)
+
+`pi-scheduler` runs source-specific availability checks (new CEA reports, IEX delivery dates and RTM
+blocks, Grid-India workbooks, NPP snapshots, MOSDAC series, Open-Meteo refresh slots) and turns new or
+revised data into jobs in a PostgreSQL queue (schema `pi_jobs`). `pi-worker` executes the jobs by
+calling the existing ingestion runners. There is no Celery or broker. The scheduler has leases,
+retries with exponential backoff, advisory locks and restart recovery.
+
+**Not active:**
+- every schedule in `config/scheduler.toml` is disabled, and `SCHEDULER_GLOBAL_ENABLE=false`;
+- migration `0011_pi_jobs` is prepared but not applied (it needs the schema owner);
+- no Windows service is installed.
+
+A schedule runs only when the global switch is on, it is enabled in the file, its configuration is synced
+to the database unchanged (hash check), and an administrator enabled it in `pi_jobs.schedule` (the
+application role `pi_app` cannot). Open-Meteo schedules are additionally refused when `OPEN_METEO_PLAN`
+and `OPEN_METEO_API_KEY` disagree, or when their worst-case daily calls would exceed the free limit; on
+the free plan they need no key (non-commercial use only).
+
+Full details, including the Windows service deployment: `docs/scheduler.md`.
+
+```bash
+python -m scripts.pi_jobs validate-config        # offline
+python -m scripts.pi_scheduler run               # service process (after activation)
+python -m scripts.pi_worker run                  # service process (after activation)
+python -m scripts.pi_jobs status                 # includes file/database configuration sync
+python -m scripts.pi_jobs enable IEX_RTM         # ADMIN role only, after approval
 ```
 
 ## Common commands

@@ -326,7 +326,8 @@ No test calls the live API.
 
 ## Known limitations
 
-- **Licence.** The free API is for **non-commercial use only** (under 10,000 calls a day, 5,000 an hour, 600 a minute), and the data is CC-BY 4.0. Commercial use needs a paid plan: set `OPEN_METEO_API_KEY`, and requests switch to the `customer-` hosts automatically.
+- **Licence.** The free API (`OPEN_METEO_PLAN=free`, the default, no API key) is for **non-commercial use only**: under 10,000 calls a day, 5,000 an hour and 600 a minute. Commercial use needs a paid plan: set `OPEN_METEO_PLAN=commercial` and `OPEN_METEO_API_KEY`, and requests go to the `customer-` hosts. **The pipeline itself switches to the `customer-` host whenever a key is set**, so keep the key empty on the free plan. The scheduler refuses the mismatch; manual `ingest_open_meteo` runs do not check it.
+- **Attribution (CC BY 4.0).** Open-Meteo data is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Anything that shows or shares it, such as reports, dashboards or exports, must credit "Weather data by [Open-Meteo.com](https://open-meteo.com/)", link to the licence, and say if the data was changed.
 - **No forecast issue time.** `forecast_issued_at` is NULL, and vintages are identified by `retrieved_at` and the run. The API docs mention separate model-run metadata, but it is not used because it was not verified for the default "best match" model selection.
 - **Grid-cell snapping.** Open-Meteo returns data for the nearest grid cell; the cell's coordinates and elevation are in the raw file. They are not stored in the database, because the schema has no columns for them.
 - **Historical delay.** ERA5 has about a 5-day delay. Recent dates may return nulls, which are rejected as `ALL_MEASUREMENTS_NULL`; re-run later to fill them.

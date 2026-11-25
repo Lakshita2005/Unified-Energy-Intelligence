@@ -116,10 +116,11 @@ def setup_logging(
     _remove_managed_handlers(root)
     root.setLevel(resolved_level)
 
-    console_handler = logging.StreamHandler(stream or sys.stdout)
-    console_handler.setFormatter(formatter)
-    setattr(console_handler, _MANAGED_HANDLER_ATTR, True)
-    root.addHandler(console_handler)
+    if settings.log_to_console or not settings.log_to_file:   # never end up with no handler at all
+        console_handler = logging.StreamHandler(stream or sys.stdout)
+        console_handler.setFormatter(formatter)
+        setattr(console_handler, _MANAGED_HANDLER_ATTR, True)
+        root.addHandler(console_handler)
 
     if settings.log_to_file:
         settings.log_dir.mkdir(parents=True, exist_ok=True)

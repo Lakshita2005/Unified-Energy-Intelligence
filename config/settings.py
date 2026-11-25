@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     log_format: LogFormat = "text"
     log_dir: Path = Path("logs")
     log_to_file: bool = True
+    # Console (stdout) logging. Services set LOG_TO_CONSOLE=false so the service wrapper's stdout capture
+    # does not duplicate the rotating log file.
+    log_to_console: bool = True
     log_file_name: str = "ingestion.log"
     log_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     log_backup_count: int = Field(default=5, ge=0)
@@ -84,7 +87,14 @@ class Settings(BaseSettings):
     http_verify_ssl: bool = True
 
     # --- Open-Meteo --------------------------------------------------------
-    # Only needed for commercial use (customer- API hosts). Never logged.
+    # "free": https://api.open-meteo.com / archive-api.open-meteo.com, no API key, NON-COMMERCIAL use only,
+    #         fewer than 10,000 calls a day, data under CC BY 4.0 (attribution required).
+    # "commercial": paid plan; requires OPEN_METEO_API_KEY (the pipeline then uses the customer- hosts).
+    # The scheduler refuses Open-Meteo schedules when plan and key disagree, so the endpoint never changes
+    # silently.
+    open_meteo_plan: Literal["free", "commercial"] = "free"
+    open_meteo_daily_call_limit: int = Field(default=10000, ge=1)
+    # Only for the commercial plan. Never logged.
     open_meteo_api_key: SecretStr | None = None
     weather_locations_file: Path = Path("config/weather_locations.toml")
 
@@ -142,13 +152,37 @@ class Settings(BaseSettings):
     mosdac_locations_file: Path = Path("config/mosdac_locations.toml")
     mosdac_request_pause_seconds: float = Field(default=1.0, ge=0)
 
+    # --- Scheduler / worker (src/scheduler, pi_jobs schema, migration 0011_pi_jobs) ---------------
+    # Master switch: while false, no schedule is checked even if enabled in SCHEDULER_CONFIG_FILE.
+    scheduler_global_enable: bool = False
+    scheduler_config_file: Path = Path("config/scheduler.toml")
+    scheduler_timezone: str = "Asia/Kolkata"
+    scheduler_tick_seconds: float = Field(default=30.0, ge=1)
+    scheduler_recovery_interval_seconds: float = Field(default=300.0, ge=10)
+    scheduler_jobs_schema: str = "pi_jobs"
+    scheduler_log_file_name: str = "pi-scheduler.log"
+    worker_log_file_name: str = "pi-worker.log"
+    # Manual commands get their own files so they never share (and break rotation of) a service's log.
+    scheduler_check_log_file_name: str = "pi-scheduler-check.log"
+    worker_once_log_file_name: str = "pi-worker-once.log"
+    worker_concurrency: int = Field(default=2, ge=1, le=16)
+    worker_poll_seconds: float = Field(default=10.0, ge=0.5)
+    worker_lease_seconds: int = Field(default=600, ge=60)
+    worker_heartbeat_seconds: int = Field(default=30, ge=5)
+    worker_shutdown_grace_seconds: int = Field(default=300, ge=0)
+    # Optional graceful-stop file (for hosts that cannot send Ctrl+C, e.g. Task Scheduler): when it
+    # exists, the process finishes its current work and exits.
+    scheduler_stop_file: Path | None = None
+    worker_stop_file: Path | None = None
+
     # --- Raw storage -------------------------------------------------------
     raw_storage_backend: RawStorageBackendName = "local"
     raw_data_dir: Path = Path("raw_data")
     raw_storage_write_metadata: bool = True
 
     @field_validator("db_host", "db_name", "db_user", "db_password", "db_sslmode", "open_meteo_api_key",
-                     "wbes_utility_id", "wbes_session_file", "imd_api_key", "imd_api_key_header", mode="before")
+                     "wbes_utility_id", "wbes_session_file", "imd_api_key", "imd_api_key_header",
+                     "scheduler_stop_file", "worker_stop_file", mode="before")
     @classmethod
     def _blank_to_none(cls, value: Any, info: ValidationInfo) -> Any:
         """Treat empty strings (e.g. ``DB_HOST=`` in .env) as unset.
@@ -171,6 +205,11 @@ class Settings(BaseSettings):
             raise ValueError(f"DB_SCHEMA must be a lower-case PostgreSQL identifier, got {value!r}")
         return schema
 
+    @field_validator("open_meteo_plan", mode="before")
+    @classmethod
+    def _normalise_open_meteo_plan(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
+
     @field_validator("log_level")
     @classmethod
     def _normalise_log_level(cls, value: str) -> str:
@@ -179,11 +218,22 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_LEVEL must be one of {sorted(_VALID_LOG_LEVELS)}, got {value!r}")
         return level
 
-    @field_validator("log_dir", "raw_data_dir", "weather_locations_file", "mosdac_locations_file")
+    @field_validator("log_dir", "raw_data_dir", "weather_locations_file", "mosdac_locations_file",
+                     "scheduler_config_file", "scheduler_stop_file", "worker_stop_file")
     @classmethod
-    def _resolve_relative_paths(cls, value: Path) -> Path:
+    def _resolve_relative_paths(cls, value: Path | None) -> Path | None:
         """Interpret relative paths as relative to the project root."""
+        if value is None:
+            return None
         return value if value.is_absolute() else (PROJECT_ROOT / value).resolve()
+
+    @field_validator("scheduler_jobs_schema")
+    @classmethod
+    def _validate_jobs_schema(cls, value: str) -> str:
+        schema = value.strip()
+        if not _SCHEMA_NAME_PATTERN.fullmatch(schema):
+            raise ValueError(f"SCHEDULER_JOBS_SCHEMA must be a lower-case PostgreSQL identifier, got {value!r}")
+        return schema
 
 
 @lru_cache(maxsize=1)
