@@ -39,7 +39,7 @@ STATES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("JK", "Jammu and Kashmir", "NR", ("JAMMU & KASHMIR",)),
     ("JH", "Jharkhand", "ER", ()),
     ("KA", "Karnataka", "SR", ()),
-    ("KL", "Kerala", "SR", ()),
+    ("KL", "Kerala", "SR", ("KERALAM",)),
     ("LA", "Ladakh", "NR", ()),
     ("LD", "Lakshadweep", "SR", ()),
     ("MP", "Madhya Pradesh", "WR", ()),

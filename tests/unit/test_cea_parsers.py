@@ -301,6 +301,13 @@ def test_classify_area_former_uts_and_others_without_region() -> None:
     assert classify_area("Others", None) is None
 
 
+def test_keralam_is_mapped_to_kerala() -> None:
+    # From the 2026-09 monthly PSP report onward, CEA names the state "Keralam" (official renaming of Kerala).
+    assert state_code("Keralam") == state_code(" KERALAM ") == state_code("Kerala") == "KL"
+    area = classify_area("Keralam", "SR")
+    assert (area["area_code"], area["area_type"], area["state_code"], area["region_code"]) == ("KL", "STATE", "KL", "SR")
+
+
 def test_parse_listing() -> None:
     html = listing_html("Power Supply Position - Energy", [("2026-08", ENERGY_UUID.upper()), ("bad", "x")])
     entries = parse_listing(html, listing_title="Power Supply Position - Energy")
