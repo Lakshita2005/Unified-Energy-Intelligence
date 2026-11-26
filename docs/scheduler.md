@@ -4,10 +4,11 @@ The scheduler keeps the database current by polling each source for newly publis
 it into ingestion jobs. A worker executes those jobs by calling the existing ingestion runners. The
 pipelines themselves are unchanged.
 
-> **Status (2026-11-25): implemented and tested offline, not active.**
+> **Status (2026-11-26): deployed, not active.**
 > - Every schedule in `config/scheduler.toml` is `enabled = false`, and `SCHEDULER_GLOBAL_ENABLE=false`.
-> - Migration `0011_pi_jobs` is prepared but **not applied**. It needs the schema owner. It is the last step of the approved chain `0009_mosdac → 0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs`; it uses nothing from 0010, 0012 or 0013 (ordering only).
-> - No Windows service is installed.
+> - Migrations applied by the schema owner on 2026-11-26: `0009_mosdac → 0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs` (head). 0011 uses nothing from 0010, 0012 or 0013 (ordering only).
+> - `pi_jobs.schedule` holds the 13 synced schedules, all disabled in the database. The queue integration tests passed on PostgreSQL 18.7 as `pi_app` (9 passed; the retention test needs the owner).
+> - Two Windows Task Scheduler tasks, `\PI\pi-scheduler` and `\PI\pi-worker`, run as `LOCAL SERVICE` and are registered **Disabled**: see [deployment](#windows-server-2019-deployment-task-scheduler).
 > - Activation candidates (company permission for internal use confirmed 2026-11-25): every implemented
 >   dataset. Open-Meteo is set up for its **free endpoint (no API key, non-commercial use only, under
 >   10,000 calls a day, CC BY 4.0 attribution)** and may only be activated for non-commercial use. All
@@ -129,11 +130,13 @@ A retry is safe: the price document is then a duplicate and skipped by SHA-256, 
   | `process_heartbeat` | SELECT, INSERT, UPDATE |
 
   **No DELETE or TRUNCATE**: the application never deletes (retention is an owner task, below). The advisory locks need no privilege.
-- **Schedule enablement is admin-only.** Recommended: keep it with the schema owner, or create a small dedicated admin role (for example `pi_jobs_admin`, NOLOGIN, granted to the named administrators) and pass it as `PI_JOBS_ADMIN_ROLE` when applying the migration. That role gets USAGE, SELECT on all `pi_jobs` tables and UPDATE (`enabled`) on `schedule` only. Run `pi_jobs enable <KEY>` with that role's credentials supplied the same way as for the migration (never in `.env`). This separates "the configuration says it may run" (git-reviewed file, synced by the application) from "an administrator switched it on" (database), and the hash check stops an unsynced file edit from running.
+- **Schedule enablement is admin-only.** Recommended: keep it with the schema owner, or create a small dedicated admin role (for example `pi_jobs_admin`, NOLOGIN, granted to the named administrators) and pass it as `PI_JOBS_ADMIN_ROLE` when applying the migration. That role gets USAGE, SELECT on all `pi_jobs` tables and UPDATE (`enabled`) on `schedule` only. Run `pi_jobs enable <KEY>` with that role's credentials supplied the same way as for the migration (never in `.env`). This separates "the configuration says it may run" (git-reviewed file, synced by the application) from "an administrator switched it on" (database), and the hash check stops an unsynced file edit from running. **Current installation:** no admin role was created (`PI_JOBS_ADMIN_ROLE` was empty when 0011 was applied), so `pi_jobs enable/disable` runs with the schema owner's identity.
 - **Foreign keys:** `job.check_id → availability_check` and `source_watermark.last_job_id → job` are `ON DELETE SET NULL`; `job_attempt.job_id → job` is `ON DELETE CASCADE`. See [Retention](#retention).
 - **Downgrade:** refused while `pi_jobs.job` holds rows, unless `PI_JOBS_ALLOW_DROP=yes`.
 
 ### Applying migration 0011 as the schema owner
+
+Applied on 2026-11-26 (rolled-back dry run first, then `alembic upgrade head`; the database is at `0011_pi_jobs`). The procedure stays the reference for later migrations and for every command that needs the owner identity, such as `pi_jobs enable`.
 
 Never put the `postgres` password in `.env`, in a command-line argument, in a script file or in shell history. The application's `.env` keeps `DB_USER=pi_app`; the owner identity is supplied for **one PowerShell process only**: environment variables override `.env`, and an empty `DB_PASSWORD` produces a connection URL without a password, so libpq takes it from `PGPASSWORD` or the password file.
 
@@ -174,8 +177,8 @@ Close the window afterwards. Check that PowerShell transcription is not writing 
 | Retries | **TRANSIENT** (timeouts, connection errors, HTTP 408/425/429/5xx) → `RETRY_WAIT` after `backoff_base × 2^(attempt−1)` (2, 4, 8, 16 min, capped at 30 min), at most `max_attempts` (5). The HTTP client's own retries happen inside each attempt.<br>**NOT_PUBLISHED** (404, empty IEX data, missing listing) → never an error; detected again later.<br>**PERMANENT** (format changes, validation, invalid arguments) → FAILED, no retry; the watermark is QUARANTINED until someone runs `requeue`.<br>After retries are exhausted, the item waits `failure_cooldown` (6 h) before it can be queued again. |
 | Atomic state | A job and its QUEUED watermark are inserted in one transaction; a job's final state, its attempt row and its watermark are written in one transaction. A watermark is only updated by a job of the **same version** (a late finish of an older version never marks a newer revision as ingested). `requeue` refuses a job whose item now has a different version unless `--force`, and never relabels the newer version. |
 | Recovery | Jobs live in PostgreSQL, so a restart loses nothing. A worker that crashes or is killed stops renewing its lease; after `WORKER_LEASE_SECONDS` (10 min) the scheduler puts the job back to RETRY_WAIT (FAILED, with a FAILED watermark in the same transaction, if no attempts remain). A late finish by the old worker is ignored. Session advisory locks vanish with the crashed process. On start, the scheduler recovers leases and checks every enabled schedule immediately (**catch-up**); checkers look back up to `catchup_max_days` (7), never further. |
-| Single scheduler | The scheduler re-checks on **every tick** (in `pg_locks`, on its own session) that it still holds `pi.jobs:scheduler`. If the session was lost (database restart, network drop, terminated backend), another scheduler may already hold the lock, so it stops at once with exit code 1 and the service wrapper restarts it; the restarted process waits for the lock. |
-| Graceful stop | Ctrl+C, Ctrl+Break or SIGTERM (what service wrappers send), or the optional stop file. All waits are cut into 1-second slices, so a stop request is noticed within about a second (on Windows a console control event reaches Python only when a blocking wait returns; a single 30 s wait delayed the stop by up to 30 s). The scheduler stops after the current check. Workers stop claiming and wait up to `WORKER_SHUTDOWN_GRACE_SECONDS` (300, one shared deadline for all slots) for running jobs; anything cut off is recovered through its lease. |
+| Single scheduler | The scheduler re-checks on **every tick** (in `pg_locks`, on its own session) that it still holds `pi.jobs:scheduler`. If the session was lost (database restart, network drop, terminated backend), another scheduler may already hold the lock, so it stops at once with exit code 1 and the watchdog trigger starts it again. A scheduler that finds the lock held does not wait: it exits with code 1 and is retried at the next watchdog start. |
+| Graceful stop | The stop file (`SCHEDULER_STOP_FILE`, `WORKER_STOP_FILE`; the deployed way, because Task Scheduler cannot send Ctrl+C), or Ctrl+C, Ctrl+Break or SIGTERM in a console. All waits are cut into 1-second slices, so a stop request is noticed within about a second. The scheduler stops after the check in progress, and a stop requested before or during start-up skips the lock, lease recovery and the catch-up check. Workers stop claiming and let running jobs finish: after `WORKER_SHUTDOWN_GRACE_SECONDS` (300, one shared deadline for all slots) they log a warning, but the process still waits for the job. Only a killed process cuts a job off; it is then recovered through its lease. |
 | Monitoring | `availability_check`, `job` and `job_attempt` hold every timestamp, count, retry and error.<br>`python -m scripts.pi_jobs status` shows: each schedule's last check and outcome; active jobs; the last success; process heartbeats.<br>`health` exits non-zero when the scheduler or worker heartbeat is older than `--max-age`. |
 
 ## Configuration
@@ -207,15 +210,15 @@ Close the window afterwards. Check that PowerShell transcription is not writing 
 | `SCHEDULER_CHECK_LOG_FILE_NAME` | `pi-scheduler-check.log` (manual `pi_scheduler check`) |
 | `WORKER_LOG_FILE_NAME` | `pi-worker.log` |
 | `WORKER_ONCE_LOG_FILE_NAME` | `pi-worker-once.log` (manual `pi_worker once`) |
-| `LOG_TO_CONSOLE` | `true`; set `false` for the services (see deployment) |
+| `LOG_TO_CONSOLE` | `true` (under Task Scheduler the console copy is simply discarded) |
 | `WORKER_CONCURRENCY` | 2 |
 | `WORKER_POLL_SECONDS` | 10 |
 | `WORKER_LEASE_SECONDS` | 600 |
 | `WORKER_HEARTBEAT_SECONDS` | 30 |
 | `WORKER_SHUTDOWN_GRACE_SECONDS` | 300 |
-| `SCHEDULER_STOP_FILE`, `WORKER_STOP_FILE` | optional |
+| `SCHEDULER_STOP_FILE`, `WORKER_STOP_FILE` | optional; deployed: `C:\PI\run\pi-scheduler.stop`, `C:\PI\run\pi-worker.stop` |
 
-**Logs:** one rotating file per process in `LOG_DIR`, sized by `LOG_MAX_BYTES` (10 MB) with `LOG_BACKUP_COUNT` (5) backups. Python's `RotatingFileHandler` is not safe for two processes writing one file, so the manual `check` and `once` commands use their own files and never interleave with, or rotate, a running service's log. Pipeline logs of a job go to the worker's file. `pi_jobs` logs to stderr only.
+**Logs:** one rotating file per process in `LOG_DIR` (deployed: `C:\PI\logs`), sized by `LOG_MAX_BYTES` (10 MB) with `LOG_BACKUP_COUNT` (5) backups. Python's `RotatingFileHandler` is not safe for two processes writing one file, so the manual `check` and `once` commands use their own files and never interleave with, or rotate, a running service's log. Pipeline logs of a job go to the worker's file. `pi_jobs` logs to stderr only.
 
 ## Commands
 
@@ -225,8 +228,8 @@ cd C:\PI\app
 .\.venv\Scripts\python.exe -m scripts.pi_jobs sync-config --dry-run      # needs 0011; rolled back
 .\.venv\Scripts\python.exe -m scripts.pi_jobs sync-config
 .\.venv\Scripts\python.exe -m scripts.pi_scheduler check --schedule IEX_RTM   # live probe, writes nothing
-.\.venv\Scripts\python.exe -m scripts.pi_scheduler run                   # service process
-.\.venv\Scripts\python.exe -m scripts.pi_worker run                      # service process (2 slots)
+.\.venv\Scripts\python.exe -m scripts.pi_scheduler run                   # task process (not by hand while the tasks are enabled)
+.\.venv\Scripts\python.exe -m scripts.pi_worker run                      # task process (2 slots)
 .\.venv\Scripts\python.exe -m scripts.pi_worker once                     # one job, then exit
 .\.venv\Scripts\python.exe -m scripts.pi_jobs status
 .\.venv\Scripts\python.exe -m scripts.pi_jobs health --max-age 180
@@ -241,144 +244,168 @@ cd C:\PI\app
 
 **Exit codes** (`pi_scheduler`, `pi_worker`):
 
-| Code | Meaning | Service wrapper |
+| Code | Meaning | Under Task Scheduler |
 |---|---|---|
-| `0` | normal stop | — |
-| `1` | runtime failure: scheduler lock already held or lost, unexpected error | restart (after a delay) |
-| `2` | configuration error: migration missing, invalid `scheduler.toml`, invalid option | **do not restart** (it would fail the same way forever) |
+| `0` | normal stop (also: not started because the stop file exists) | started again by the watchdog within 5 min while the task is enabled |
+| `1` | runtime failure: scheduler lock already held or lost, unexpected error | started again by the watchdog within 5 min |
+| `2` | configuration error: migration missing, invalid `scheduler.toml`, invalid option | also started again every 5 min and fails the same way until fixed; check the last result and the log |
+
+The manual commands above use the development `.venv` and run as the logged-on administrator; the tasks use `C:\PI\venv-svc` as `LOCAL SERVICE`. Both read the same `C:\PI\app\.env`.
 
 `pi_jobs`: `0` ok, `1` refused / unhealthy / database or permission error, `2` configuration error.
 
-## Windows Server 2019 deployment (not installed yet)
+## Windows Server 2019 deployment (Task Scheduler)
 
-**Recommended:** two Windows services wrapping the console processes with **NSSM**, the Non-Sucking Service Manager (a single `nssm.exe`, nothing else installed).
-- **What it provides:** automatic start at boot (delayed), restart after a crash, a graceful stop by Ctrl+C, and its own rotation for stdout/stderr capture.
-- **Why a wrapper:** `sc.exe create` cannot run a Python script directly as a service (it needs a service-aware executable).
-- **Alternative:** WinSW, an equivalent XML-configured wrapper, works the same way; see below.
-- **Not recommended:** Task Scheduler, which can't send Ctrl+C. Use it only as a fallback, with the stop files.
+> **State (2026-11-26):** both tasks are registered and **Disabled**. Each was started once for testing as `LOCAL SERVICE`, with every schedule disabled and the global switch off, and stopped again.
 
-**Prerequisites:**
-- **NSSM binary:** NSSM 2.24 (2014) is the last stable release and the project is no longer actively maintained; on current Windows versions the 2.24-101 pre-release build is commonly used. Download it only from nssm.cc, record and verify its SHA-256 against a trusted copy, and place it where only administrators can write (e.g. `C:\PI\tools\nssm\nssm.exe`). If an unmaintained binary is not acceptable, use WinSW (below).
-- **Service account:** a dedicated, non-administrator account; never LocalSystem.
-  - **Preferred:** a group managed service account (gMSA, e.g. `DOMAIN\gmsa_pi$`) if the server is domain-joined: Windows manages its password, so no password is ever handled.
-  - **Otherwise:** a local account (e.g. `.\svc_pi`) with a long random password kept in the company password vault.
-  - **Rights:** "Log on as a service" (`secpol.msc` → Local Policies → User Rights Assignment). Setting the account in `services.msc` grants it automatically; the CIM method below does **not**, so grant it explicitly and check that no group policy removes it ("Deny log on as a service" must not include the account). It needs no interactive logon.
-  - **File access:** read on `C:\PI\app` (code, `.venv`, `config`) and `.env`; modify on `LOG_DIR` (`C:\PI\app\logs`) and `RAW_DATA_DIR`; nothing else.
-  - **Network:** outbound HTTPS to the source hosts and the PostgreSQL port.
-- **`.env` permissions:** restrict to the service account and administrators, because it holds the `pi_app` password. (It never holds the `postgres` password.)
-- **PostgreSQL service name** (for the dependency): `Get-Service *postgres*`.
+Two Windows **Task Scheduler** tasks run the console processes. Task Scheduler is built into Windows, needs no extra binary and no stored password, and runs the tasks without anyone logged on. What it cannot do, the application covers:
 
-```powershell
-# Run in an elevated PowerShell. Replace <POSTGRES_SERVICE>. NO password appears in any command.
-$nssm = "C:\PI\tools\nssm\nssm.exe"
-$py   = "C:\PI\app\.venv\Scripts\python.exe"
-$app  = "C:\PI\app"
-foreach ($svc in @(@{n="pi-scheduler"; a="-m scripts.pi_scheduler run"; d="PI availability scheduler"},
-                   @{n="pi-worker";    a="-m scripts.pi_worker run";    d="PI ingestion worker"})) {
-  & $nssm install $svc.n $py $svc.a
-  & $nssm set $svc.n AppDirectory $app
-  & $nssm set $svc.n DisplayName $svc.d
-  & $nssm set $svc.n Start SERVICE_DELAYED_AUTO_START
-  & $nssm set $svc.n DependOnService <POSTGRES_SERVICE>
-  # The application writes its own rotating log; no duplicate console copy. stdout/stderr capture
-  # then only holds start-up failures and crash tracebacks.
-  & $nssm set $svc.n AppEnvironmentExtra PYTHONUNBUFFERED=1 LOG_TO_CONSOLE=false
-  & $nssm set $svc.n AppStdout "$app\logs\$($svc.n).service.log"
-  & $nssm set $svc.n AppStderr "$app\logs\$($svc.n).service.log"
-  & $nssm set $svc.n AppRotateFiles 1
-  & $nssm set $svc.n AppRotateOnline 1
-  & $nssm set $svc.n AppRotateBytes 10485760
-  & $nssm set $svc.n AppExit Default Restart       # 0 / 1 / crash: restart ...
-  & $nssm set $svc.n AppExit 2 Exit                # ... but NOT a configuration error (exit code 2)
-  & $nssm set $svc.n AppRestartDelay 30000         # wait 30 s before restarting
-  & $nssm set $svc.n AppThrottle 60000
-  & $nssm set $svc.n AppStopMethodSkip 6           # stop = Ctrl+C only (skip WM_CLOSE / thread messages)
-  # SCM recovery actions cover a crash of nssm.exe itself. Do NOT enable 'sc.exe failureflag':
-  # it would also fire them after a deliberate exit 2 and recreate the restart loop.
-  sc.exe failure $svc.n reset= 86400 actions= restart/60000/restart/60000/restart/300000
-}
-& $nssm set pi-scheduler AppStopMethodConsole 60000    # Ctrl+C, then up to 60 s (stops within ~1 s)
-& $nssm set pi-worker    AppStopMethodConsole 400000   # >= 360 s: grace 300 s + margin for the last commit
-
-# Log-on account, without a password on any command line:
-#   gMSA:   sc.exe config pi-scheduler obj= 'DOMAIN\gmsa_pi$'   (same for pi-worker; no password exists)
-#   local:  services.msc -> pi-scheduler -> Log On -> This account (typed into the dialog), or:
-$cred = Get-Credential -UserName '.\svc_pi' -Message 'Log-on account for pi-scheduler and pi-worker'
-foreach ($n in 'pi-scheduler', 'pi-worker') {
-  $r = Get-CimInstance Win32_Service -Filter "Name='$n'" |
-       Invoke-CimMethod -MethodName Change -Arguments @{ StartName = $cred.UserName;
-                                                         StartPassword = $cred.GetNetworkCredential().Password }
-  "$n log-on change: ReturnValue $($r.ReturnValue)"     # 0 = success
-}
-Remove-Variable cred
-# Then grant "Log on as a service" to the account (secpol.msc) - the CIM method does not.
-
-# Do NOT start yet: services stay stopped until activation is approved.
-# Later:  Start-Service pi-worker, pi-scheduler   /   Stop-Service pi-scheduler, pi-worker
-```
-
-**Why not `nssm set ... ObjectName <account> <password>`:** the password would be on the command line (visible to other processes while it runs, in PSReadLine history and in any transcription or process-creation audit log). `Get-Credential` and the `services.msc` dialog take it as a prompt instead.
-
-**System shutdown:** during an OS shutdown Windows gives services only a short, fixed time (`WaitToKillServiceTimeout`, a few seconds by default), whatever `AppStopMethodConsole` says. A job cut off then is recovered through its lease after restart; no data is lost because every load is transactional.
-
-**After installing, verify before activation:**
-1. `nssm get pi-worker AppExit 2` returns `Exit`, and `nssm get pi-worker AppStopMethodConsole` returns `400000`.
-2. Start `pi-scheduler` once while migration 0011 is missing or with an invalid `SCHEDULER_CONFIG_FILE`: the service must end **stopped** with exit code 2 in `pi-scheduler.service.log`, without restarting.
-3. `Stop-Service pi-scheduler` completes within a few seconds and the log shows `Stop requested (SIGINT)`.
-
-**How the requirements are met:**
-
-| Requirement | How |
+| Need | How it is met |
 |---|---|
-| Automatic start after reboot | `SERVICE_DELAYED_AUTO_START`, after PostgreSQL |
-| Restart after a crash | NSSM `AppExit Default Restart` (exit 0/1 and crashes), plus SCM recovery actions for an `nssm.exe` crash; **no restart** on exit code 2 (configuration error) |
-| Graceful shutdown | Ctrl+C triggers the processes' signal handler, noticed within about 1 s; the worker gets 400 s (> its 300 s grace); a stuck process is killed only after the timeout, and its job is recovered through its lease |
-| Separate logs and rotation | The application's own rotating `pi-scheduler.log` and `pi-worker.log` (manual commands use separate files). With `LOG_TO_CONSOLE=false` nothing is logged twice; NSSM-rotated `*.service.log` keeps only start-up errors and crash output |
-| Health and status | `pi_jobs health` (exit code), runnable from monitoring or a Task Scheduler job every 5 minutes; `pi_jobs status`; `Get-Service pi-*` |
-| Recovery after restart | Automatic: expired leases are requeued and a catch-up check runs on start |
+| Start at boot without a logon | Boot trigger, 2-minute delay, account `LOCAL SERVICE` |
+| Restart after a crash or exit | A **watchdog** time trigger every 5 minutes. While the process runs, Task Scheduler ignores it ("do not start a new instance", event 322); after any exit the task is started again within 5 minutes |
+| Only one scheduler | The task's single-instance policy, plus the PostgreSQL advisory lock: a second scheduler exits with code 1 |
+| Graceful stop | Task Scheduler cannot send Ctrl+C. Stopping uses the **stop files** (below); ending a task kills the process |
+| No restart loop on a configuration error | Not possible: exit code 2 is retried by the watchdog every 5 minutes. Visible as last result `2` and in the log |
 
-**WinSW alternative:** create `pi-worker.xml` next to `WinSW.exe`, renamed `pi-worker.exe`:
+### Tasks
 
-```xml
-<service>
-  <id>pi-worker</id><name>PI ingestion worker</name>
-  <executable>C:\PI\app\.venv\Scripts\python.exe</executable>
-  <arguments>-m scripts.pi_worker run</arguments>
-  <workingdirectory>C:\PI\app</workingdirectory>
-  <startmode>Automatic</startmode><delayedAutoStart>true</delayedAutoStart>
-  <env name="LOG_TO_CONSOLE" value="false"/>
-  <stoptimeout>400 sec</stoptimeout>
-  <onfailure action="restart" delay="30 sec"/><onfailure action="restart" delay="60 sec"/>
-  <log mode="roll-by-size"><sizeThreshold>10240</sizeThreshold><keepFiles>5</keepFiles></log>
-  <!-- service account (WinSW v3 syntax): <serviceaccount><username>DOMAIN\gmsa_pi$</username><allowservicelogon>true</allowservicelogon></serviceaccount>
-       (gMSA, no password). For a local account, set it in services.msc instead of writing a password here. -->
-</service>
-```
+| | `\PI\pi-scheduler` | `\PI\pi-worker` |
+|---|---|---|
+| Account | `NT AUTHORITY\LOCAL SERVICE` (S-1-5-19), least privilege, no password | same |
+| Program | `C:\PI\venv-svc\Scripts\python.exe` | same |
+| Arguments | `-m scripts.pi_scheduler run` | `-m scripts.pi_worker run` |
+| Start in | `C:\PI\app` | same |
+| Triggers | at startup + 2 min; every 5 min, indefinitely (watchdog) | same |
+| If already running | do not start a new instance (`IgnoreNew`) | same |
+| Time limit | none (`PT0S`; the Task Scheduler default of 72 h would kill the process) | same |
+| Priority | 5 (normal; the default 7 is below normal) | same |
+| Restart on failure | every 1 min, 3 times (covers only a failure to **launch**, not an exit code) | same |
+| Conditions | none (no battery, idle or network conditions); start when available after a missed trigger | same |
 
-Then `pi-worker.exe install`. Do the same for `pi-scheduler` with a `<stoptimeout>` of 60 seconds. WinSW sends Ctrl+C on stop. WinSW's `onfailure` applies to every non-zero exit; check its documentation for excluding exit code 2, or rely on `AppThrottle`-style back-off and the health check.
-
-**Task Scheduler fallback** (no extra binary; no Ctrl+C, so set `SCHEDULER_STOP_FILE` and `WORKER_STOP_FILE` and create those files to stop):
+The definitions are in `C:\PI\tools\tasks\task_pi-scheduler.xml` and `task_pi-worker.xml`. Registered, disabled, with (elevated PowerShell):
 
 ```powershell
-schtasks /Create /TN "PI\pi-scheduler" /SC ONSTART /DELAY 0002:00 /RU svc_pi /RP * /RL LIMITED /TR "C:\PI\app\.venv\Scripts\python.exe -m scripts.pi_scheduler run" /F
+foreach ($t in 'pi-scheduler', 'pi-worker') {
+  Register-ScheduledTask -TaskPath '\PI\' -TaskName $t -Xml (Get-Content "C:\PI\tools\tasks\task_$t.xml" -Raw) `
+                         -User 'NT AUTHORITY\LOCALSERVICE' | Out-Null
+  Disable-ScheduledTask -TaskPath '\PI\' -TaskName $t | Out-Null
+}
 ```
 
-Set "Restart on failure" and "Start in: C:\PI\app" in the task's settings.
+`C:\PI\venv-svc\Scripts\python.exe` is CPython's venv launcher: it starts the real interpreter (`C:\PI\tools\python313\python.exe`) as a child in a job object that is killed with the launcher, and it returns the child's exit code. So a task shows two `python.exe` processes, ending the task ends both, and the task's last result is the application's exit code.
+
+### Python environment for the tasks
+
+- `C:\PI\tools\python313`: CPython 3.13.14 from the official CPython package on nuget.org (`python`; `python.exe` signed by the Python Software Foundation), outside any user profile.
+- `C:\PI\venv-svc`: the tasks' virtual environment, built from that interpreter with exactly the package versions of the development `.venv` (`pip freeze` as constraints; `C:\PI\tools\pi-svc-constraints.txt`).
+- **Why not `.venv`:** its base interpreter lives in the Administrator's user profile, which `LOCAL SERVICE` cannot read.
+- **After a dependency change:** install the same versions into `venv-svc` (`-r requirements.txt -c <new freeze>`), then run `pip check` and the unit tests with `C:\PI\venv-svc\Scripts\python.exe`.
+
+### Environment and files
+
+- **Settings:** the code reads `C:\PI\app\.env` by its own location, so the tasks get exactly the settings of the manual commands. The tasks set no environment variables of their own. `.env` contains `SCHEDULER_STOP_FILE=C:\PI\run\pi-scheduler.stop` and `WORKER_STOP_FILE=C:\PI\run\pi-worker.stop`.
+- **Database:** `pg_hba.conf` requires `scram-sha-256` on 127.0.0.1, so the Windows account does not matter; the `pi_app` password from `.env` is used.
+- **Permissions** (applied 2026-11-26; `C:\PI` no longer inherits from `C:\`):
+
+  | Path | SYSTEM, Administrators | `LOCAL SERVICE` | Other local users |
+  |---|---|---|---|
+  | `C:\PI` (app, `.venv`, `venv-svc`, tools) | full control | read + execute | read + execute |
+  | `C:\PI\logs`, `C:\PI\raw_data`, `C:\PI\run` | full control | read + execute, **create files and folders**, full control on what it creates | read + execute |
+  | `C:\PI\app\.env` | full control | read | **none** |
+
+  Backup of the previous permissions of every item: `C:\PI\tools\acl-backup\pi_tree_before_hardening.acl`. Restore with `icacls C:\PI /inheritance:e`, then `icacls C:\ /restore C:\PI\tools\acl-backup\pi_tree_before_hardening.acl`.
+- **Python caches:** `LOCAL SERVICE` cannot write `__pycache__` in the code folders; Python then compiles in memory (slightly slower start, no error).
+
+### Logs and history
+
+- `C:\PI\logs\pi-scheduler.log` and `C:\PI\logs\pi-worker.log`: rotating (10 MB × 5), created and owned by `LOCAL SERVICE`. Pipeline logs of a job go to the worker's file.
+- Manual diagnostics write their own files: `pi-scheduler-check.log` (`pi_scheduler check`), `pi-worker-once.log` (`pi_worker once`).
+- `LOG_TO_CONSOLE` stays `true`; under Task Scheduler there is no visible console, so that copy is discarded. Output written before logging is set up (for example an import error) is not captured: the task's last result shows the exit code.
+- **Task Scheduler history** is enabled (`wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true`). Useful events: 100 started, 102 finished, 201 action completed with return code, 322 start ignored (already running), 111 terminated, 142 disabled.
+
+```powershell
+foreach ($t in 'pi-scheduler', 'pi-worker') {
+  $i = Get-ScheduledTaskInfo -TaskPath '\PI\' -TaskName $t
+  '{0}: state={1} last run={2} last result={3}' -f $t, (Get-ScheduledTask -TaskPath '\PI\' -TaskName $t).State, $i.LastRunTime, $i.LastTaskResult
+}
+# last result: 0 ok, 1 runtime failure, 2 configuration error, 267009 running, 267011 never run, 267014 terminated
+Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; StartTime = (Get-Date).AddDays(-1) } |
+  Where-Object { $_.Message -match '\\PI\\pi-' } | Select-Object TimeCreated, Id, Message
+```
+
+### Starting, stopping and restarting
+
+Start the worker before the scheduler; stop the scheduler before the worker.
+
+```powershell
+# start (only once activation is approved; the stop file must not exist)
+Remove-Item C:\PI\run\pi-worker.stop -ErrorAction SilentlyContinue
+Enable-ScheduledTask -TaskPath '\PI\' -TaskName 'pi-worker';    Start-ScheduledTask -TaskPath '\PI\' -TaskName 'pi-worker'
+Enable-ScheduledTask -TaskPath '\PI\' -TaskName 'pi-scheduler'; Start-ScheduledTask -TaskPath '\PI\' -TaskName 'pi-scheduler'
+
+# graceful stop of one task: FIRST disable it (so the watchdog does not start it again), then the stop file
+Disable-ScheduledTask -TaskPath '\PI\' -TaskName 'pi-worker'
+New-Item -ItemType File C:\PI\run\pi-worker.stop -Force
+while (Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object CommandLine -match 'scripts\.pi_worker run') { Start-Sleep 5 }
+Remove-Item C:\PI\run\pi-worker.stop
+```
+
+- **Scheduler:** notices the stop file within about a second and stops after the check in progress. If the file exists when it starts, it exits at once (log: `pi-scheduler not started: stop requested before start-up`, exit code 0) without taking the lock, recovering leases or running the catch-up check.
+- **Worker:** stops claiming, lets running jobs finish and then exits with code 0. After `WORKER_SHUTDOWN_GRACE_SECONDS` (300 s) it logs a warning, but the process still waits for the running job; it is never cut off by the grace period.
+- **A hung job:** `Stop-ScheduledTask -TaskPath '\PI\' -TaskName 'pi-worker'` kills the process. The job's lease expires after `WORKER_LEASE_SECONDS` (10 min) and the scheduler puts it back to RETRY_WAIT. Every load is transactional, so nothing is half-written.
+- **Do not run `pi_scheduler run` or `pi_worker run` by hand while the tasks are enabled.** A second scheduler exits (lock); a second worker would work but write to the same log file. Use `pi_scheduler check` and `pi_worker once` for diagnostics.
+- **System shutdown:** processes are ended without a graceful stop; jobs are recovered through their leases after the reboot, and the boot trigger starts both tasks again.
+
+### Recovery behaviour
+
+| Event | What happens |
+|---|---|
+| Crash or exit code 1 (e.g. scheduler lock lost) | The watchdog starts the task again within 5 minutes; the scheduler recovers expired leases and runs a catch-up check |
+| Exit code 2 (configuration error: migration missing, invalid `scheduler.toml`) | Retried every 5 minutes and fails the same way until fixed; last result `2`, cause in the log |
+| PostgreSQL not up at boot | The process exits; the watchdog retries every 5 minutes |
+| Worker killed during a job | Lease expires (10 min), job back to RETRY_WAIT, retried |
+| Stop file present while the task is enabled | Each watchdog start exits at once with code 0 (no work). Disable the task before creating a stop file |
+
+### Enabling and disabling schedules safely
+
+The scheduler reads `scheduler.toml` and `.env` **once at start**, but reads the database `enabled` flag and the synced configuration hash **on every tick**.
+
+**Enable one schedule:**
+1. Live probe: `python -m scripts.pi_scheduler check --schedule <KEY>` (writes nothing).
+2. Set `enabled = true` for that schedule in `config/scheduler.toml` (reviewed in git).
+3. `python -m scripts.pi_jobs sync-config --dry-run`, then `sync-config` (the database row stays disabled).
+4. As the schema owner (no admin role was created; `PI_JOBS_ADMIN_ROLE` was empty when 0011 was applied): `python -m scripts.pi_jobs enable <KEY>`, with the owner identity supplied for that one process exactly as in [Applying migration 0011](#applying-migration-0011-as-the-schema-owner). `pi_app` gets "permission denied" by design.
+5. Once: `SCHEDULER_GLOBAL_ENABLE=true` in `.env`.
+6. Restart the scheduler task (graceful stop, then start): it loaded the old file and `.env` at start, and until it is restarted the edited schedule is refused because its in-memory configuration no longer matches the synced hash.
+7. `python -m scripts.pi_jobs status`: `would_run` must be `true` only for the approved schedules.
+
+**Disable one schedule:**
+- **Immediately:** `pi_jobs disable <KEY>` as the owner; effective at the next tick (≤ 30 s), no restart.
+- **Permanently:** also set `enabled = false` in the file, `sync-config`, restart the scheduler task.
+- Jobs already queued are **not** cancelled: `pi_jobs list --status PENDING`, then `pi_jobs cancel <id>` if needed.
+
+**Stop all automatic ingestion:** stop the scheduler task (no new jobs), then the worker task (finishes running jobs). Or set `SCHEDULER_GLOBAL_ENABLE=false` and restart the scheduler; the worker still processes jobs already queued.
+
+### Monitoring
+
+- `python -m scripts.pi_jobs health --max-age 180`: exit code 0 only if a scheduler and a worker heartbeat are fresher than 180 s. No monitoring job runs it yet.
+- `python -m scripts.pi_jobs status`: per schedule the configuration state and `would_run`, the last checks, active jobs and process heartbeats.
+- `python -m scripts.pi_jobs list --status FAILED`, then `requeue <id>` (version-aware) after fixing the cause.
+- Each process start adds one `pi_jobs.process_heartbeat` row (keyed by host and PID); old rows are harmless and are removed only by the owner (see [Retention](#retention)).
 
 ## Activation checklist
 
 Every step needs its own approval.
 
-1. **Migrations**, by the schema owner ([procedure](#applying-migration-0011-as-the-schema-owner)):
-   - review the SQL first: `alembic upgrade 0009_mosdac:head --sql` (0010 → 0012 → 0013 → 0011);
-   - then a rolled-back dry run (as for 0002–0009);
-   - then `alembic upgrade head` (0011 is the head; this applies 0010, 0012 and 0013 as well, in one transaction).
-2. **Integration tests** for the queue: `pytest tests/integration/test_scheduler_queue.py`, as `pi_app`. Every row is written inside one transaction that is always rolled back; one test opens and terminates its own extra session (advisory lock only, no rows). The retention test is skipped for `pi_app` (no DELETE) and runs only as the owner, also rolled back.
-3. **Copy the configuration:** `pi_jobs sync-config --dry-run`, then `sync-config` (all rows start disabled in the database).
-4. **Live probes:** `pi_scheduler check --schedule <KEY>` for each candidate. These are live probes that write nothing.
-5. **Per approved schedule:** set `enabled = true` in the file, `sync-config`, then the administrator runs `pi_jobs enable <KEY>`; `pi_jobs status` must show `would_run: true` only for approved schedules.
-6. **Services:** install them (stopped) and run the post-install checks, set `SCHEDULER_GLOBAL_ENABLE=true`, then start `pi-worker` and `pi-scheduler`.
-7. **Watch the first cycle:** `pi_jobs status` and `pi_jobs list`; compare job results with `pi.ingestion_run`.
+1. **Migrations** by the schema owner ([procedure](#applying-migration-0011-as-the-schema-owner)). **Done 2026-11-26:** rolled-back dry run (29/29 checks), then `alembic upgrade head`; verified as `pi_app` (20/20).
+2. **Integration tests** for the queue: `pytest tests/integration/test_scheduler_queue.py`, as `pi_app`. Every row is written inside one transaction that is always rolled back; one test opens and terminates its own extra session (advisory lock only, no rows). The retention test is skipped for `pi_app` (no DELETE) and runs only as the owner, also rolled back. **Done 2026-11-26:** 9 passed, 1 skipped (retention).
+3. **Copy the configuration:** `pi_jobs sync-config --dry-run`, then `sync-config` (all rows start disabled in the database). **Done 2026-11-26:** 13 rows, all disabled.
+4. **Tasks:** registered disabled, test-started and stopped as `LOCAL SERVICE`; folder permissions hardened. **Done 2026-11-26.**
+5. **Live probes:** `pi_scheduler check --schedule <KEY>` for each candidate. These are live probes that write nothing.
+6. **Per approved schedule:** follow [Enabling and disabling schedules safely](#enabling-and-disabling-schedules-safely); `pi_jobs status` must show `would_run: true` only for approved schedules.
+7. **Start:** enable and start `pi-worker`, then `pi-scheduler` ([procedure](#starting-stopping-and-restarting)).
+8. **Watch the first cycle:** `pi_jobs status` and `pi_jobs list`; compare job results with `pi.ingestion_run`.
 
 **Activation candidates** (2026-11-25: the company confirmed permission to use the source data for internal operations):
 
@@ -418,7 +445,10 @@ COMMIT;
 
 ## Known limitations
 
-- **Queue SQL not yet tested on PostgreSQL.** `PostgresJobRepository` is covered by `tests/integration/test_scheduler_queue.py` only once `pi_jobs` exists. The unit tests use an in-memory repository with the same semantics, plus a recording fake connection that checks which statements share a transaction.
+- **Queue SQL tested on PostgreSQL inside rolled-back transactions only.** `tests/integration/test_scheduler_queue.py` passed on PostgreSQL 18.7 as `pi_app` (the retention test needs the owner). The unit tests use an in-memory repository with the same semantics, plus a recording fake connection that checks which statements share a transaction. No job has yet run end to end through a real runner from the queue.
+- **Task Scheduler cannot stop gracefully or hold back a configuration error.** Graceful stops need the stop files; ending a task kills the process (jobs are recovered through their leases). Exit code 2 is retried by the watchdog every 5 minutes.
+- **`LOCAL SERVICE` is a shared identity.** Other Windows services running as `LOCAL SERVICE` can also read `.env` and write into `C:\PI\logs`, `C:\PI\raw_data` and `C:\PI\run`. A dedicated account would isolate this.
+- **Health is not monitored automatically.** `pi_jobs health` exists, but nothing runs it on a schedule or raises an alert yet.
 - **No committed-row concurrency test.** Two real processes racing on committed rows (claim, enqueue) are not tested, because `pi_app` cannot delete the rows afterwards. A one-off owner-run test in a scratch schema would cover it.
 - **Checks download the probe data.** CEA daily files, the IEX snapshot and NPP days are downloaded by the check and again by the job: one extra request per new item. HEAD requests were not used, because HEAD support is unverified.
 - **Open-Meteo is cadence-based.** No issue time or verified model-run metadata exists, so its refresh follows the slots, not detection.

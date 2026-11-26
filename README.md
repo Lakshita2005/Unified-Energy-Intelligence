@@ -207,10 +207,10 @@ revised data into jobs in a PostgreSQL queue (schema `pi_jobs`). `pi-worker` exe
 calling the existing ingestion runners. There is no Celery or broker. The scheduler has leases,
 retries with exponential backoff, advisory locks and restart recovery.
 
-**Not active:**
+**Deployed, not active:**
 - every schedule in `config/scheduler.toml` is disabled, and `SCHEDULER_GLOBAL_ENABLE=false`;
-- migration `0011_pi_jobs` is prepared but not applied (it needs the schema owner);
-- no Windows service is installed.
+- migrations up to `0011_pi_jobs` are applied, and the 13 schedules are synced to `pi_jobs.schedule` (all disabled);
+- two Windows Task Scheduler tasks (`\PI\pi-scheduler`, `\PI\pi-worker`, account `LOCAL SERVICE`) are registered and disabled.
 
 A schedule runs only when the global switch is on, it is enabled in the file, its configuration is synced
 to the database unchanged (hash check), and an administrator enabled it in `pi_jobs.schedule` (the
@@ -218,7 +218,7 @@ application role `pi_app` cannot). Open-Meteo schedules are additionally refused
 and `OPEN_METEO_API_KEY` disagree, or when their worst-case daily calls would exceed the free limit; on
 the free plan they need no key (non-commercial use only).
 
-Full details, including the Windows service deployment: `docs/scheduler.md`.
+Full details, including the Task Scheduler deployment and how to enable schedules: `docs/scheduler.md`.
 
 ```bash
 python -m scripts.pi_jobs validate-config        # offline
