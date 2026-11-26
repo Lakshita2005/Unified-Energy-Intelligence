@@ -4,15 +4,19 @@ The scheduler keeps the database current by polling each source for newly publis
 it into ingestion jobs. A worker executes those jobs by calling the existing ingestion runners. The
 pipelines themselves are unchanged.
 
-> **Status (2026-11-26): deployed, not active.**
-> - `IEX_DAM`, `IEX_GDAM`, `IEX_RTM`, `GRID_INDIA_PSP`, `CEA_COAL_DAILY`, `CEA_DGR_DAILY`, `CEA_PSP_MONTHLY`, `MOSDAC_SOLAR`, `MOSDAC_WIND`, `NPP_DEMAND` and `NPP_GENERATION` are `enabled = true` in `config/scheduler.toml` (approved 2026-11-26); every other schedule is disabled. They run only once the database switch (`pi_jobs enable`), `SCHEDULER_GLOBAL_ENABLE=true` and the started tasks are in place.
-> - Migrations applied by the schema owner on 2026-11-26: `0009_mosdac → 0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs` (head). 0011 uses nothing from 0010, 0012 or 0013 (ordering only).
-> - `pi_jobs.schedule` holds the 13 synced schedules, all disabled in the database. The queue integration tests passed on PostgreSQL 18.7 as `pi_app` (9 passed; the retention test needs the owner).
-> - Two Windows Task Scheduler tasks, `\PI\pi-scheduler` and `\PI\pi-worker`, run as `LOCAL SERVICE` and are registered **Disabled**: see [deployment](#windows-server-2019-deployment-task-scheduler).
-> - Activation candidates (company permission for internal use confirmed 2026-11-25): every implemented
->   dataset. Open-Meteo is set up for its **free endpoint (no API key, non-commercial use only, under
->   10,000 calls a day, CC BY 4.0 attribution)** and may only be activated for non-commercial use. All
->   stay disabled until activation is approved schedule by schedule.
+> **Status (2026-11-26, production): automatic ingestion running.**
+> - Windows Task Scheduler runs `\PI\pi-scheduler`, `\PI\pi-worker` and the health check `\PI\pi-health` as `LOCAL SERVICE` (enabled; boot + 5-minute watchdog). `SCHEDULER_GLOBAL_ENABLE=true`.
+> - Migrations applied 2026-11-26: `0009_mosdac → 0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs` (head).
+>
+> | Source | Schedules | File | Database | State |
+> |---|---|---|---|---|
+> | IEX | `IEX_DAM`, `IEX_GDAM`, `IEX_RTM` | on | on | running; price + market snapshot loaded by scheduled jobs since 11:32 |
+> | Grid-India | `GRID_INDIA_PSP` (9 sections) | on | on | running; scheduled jobs since 11:33 (incl. a 23-Nov revision); ACE stored from 26-Nov |
+> | CEA | `CEA_COAL_DAILY`, `CEA_DGR_DAILY`, `CEA_PSP_MONTHLY` | on | on | running since 12:07; coal and DGR loaded by scheduled jobs, PSP waits for November |
+> | MOSDAC | `MOSDAC_SOLAR` | on | on | running since 12:11 (8 plants) |
+> | MOSDAC | `MOSDAC_WIND` | on | **off (paused)** | the wind endpoint returns HTTP 500 for 5 of 8 plants; 3 plants of the 25-Nov series stored. Recovery: see [MOSDAC wind](#mosdac-wind-paused) |
+> | NPP | `NPP_DEMAND`, `NPP_GENERATION` | on | **off** | readiness verified; waiting for the owner's database switch (`pi_jobs enable`) |
+> | Open-Meteo | `OPEN_METEO_FORECAST`, `OPEN_METEO_HISTORICAL` | off | off | **blocked**: the free API is for non-commercial use only; internal use by a company needs a decision or a paid plan |
 >
 > Activation needs separate approvals: [Activation checklist](#activation-checklist).
 
@@ -78,7 +82,7 @@ pi-worker (WORKER_CONCURRENCY slots)
 A retry is safe: the price document is then a duplicate and skipped by SHA-256, while its stored snapshot document is offered to the snapshot load again.
 | `GRID_INDIA_PSP` | the nine Grid-India section datasets | A workbook listed but not registered in every section → job for the missing sections only. A revision has a new file name. Not listed → not published (LATE after D+1 16:00). | `date\|file` / hash(path, CreatedOn) | 15 min in 09:00–14:00, else 1 h |
 | `NPP_DEMAND`, `NPP_GENERATION` | NPP_DEMAND / NPP_GENERATION | Request today (and yesterday on the first check of the day, plus days with nothing stored). A newer `updated_on` than stored → new. | `date` / newest `updated_on` | 30 min |
-| `MOSDAC_SOLAR` | MOSDAC_SOLAR_FORECAST | Request solar for one reference plant (1 request, not one per plant). A different series start than the newest in `mosdac_solar_forecast` → new series → job `run_mosdac("solar")` for all plants. | `series\|start` | 3 h |
+| `MOSDAC_SOLAR` | MOSDAC_SOLAR_FORECAST | Request solar for one reference plant (1 request, not one per plant). A different series start than the newest in `mosdac_solar_forecast` → new series → job `run_mosdac("solar")` for all plants, **each plant independently**: plants that already hold the series are skipped, so a retry requests only the plants that failed; a job that keeps failing for some plants while others are stored ends **PARTIAL** (failed plants named in `last_error`) and its item is retried after the failure cool-down. | `series\|start` | 3 h |
 | `MOSDAC_WIND` | MOSDAC_WIND_FORECAST | The same for wind, against `mosdac_wind_forecast`; job `run_mosdac("wind")`. **Independent of solar:** its own checks, jobs, retries and watermarks. A wind outage (HTTP 500) is a SOURCE_ERROR of this schedule only; it never fails or hides a solar ingestion, and wind recovers on its own next check without waiting for a new solar series. Both share the `MOSDAC` lock group (one MOSDAC job at a time). | `series\|start` | 1 h |
 | `OPEN_METEO_FORECAST` | OPEN_METEO_FORECAST | No issue time is available, so the forecast is refreshed per slot (01:30, 07:30, 13:30, 19:30). The latest passed slot without an ingested watermark → refresh. Missed slots collapse into the latest. The check makes no request. | `slot\|time` | slots every 6 h |
 | `OPEN_METEO_HISTORICAL` | OPEN_METEO_HISTORICAL | today − 6 days (ERA5 delay). **Disabled; catch-up off.** | `date` | 03:00 |
@@ -397,11 +401,12 @@ The scheduler reads `scheduler.toml` and `.env` **once at start**, but reads the
 | `HEARTBEAT` | ERROR | the scheduler or worker heartbeat is older than 180 s |
 | `FAILED` | ERROR | a job reached FAILED since the previous run (each job is reported once) |
 | `CONFIG` | WARNING | a schedule enabled in the file is out of sync with `pi_jobs.schedule` |
-| `STALE` | WARNING | a schedule that should run has had no availability check for more than 7 hours |
+| `PARTIAL` | WARNING | a job ended PARTIAL with failed units, e.g. MOSDAC plants (each job reported once; event 1011) |
+| `STALE` | WARNING | a schedule that should run has had no availability check for longer than its own longest expected gap + 15 min (`max_check_gap_s` in `pi_jobs status`: e.g. 0.5 h for `IEX_RTM`, 16 h for `CEA_PSP_MONTHLY`), so window-only schedules are not reported overnight |
 | `QUERY` | ERROR | `pi_jobs` itself failed (database down, configuration error) |
 
 - **Results:** one JSON line per run in `C:\PI\logs\pi-health.log` (rotated at 5 MB); the state between runs in `C:\PI\run\pi-health.state.json`; the task's last result is `0` OK, `1` WARNING, `2` ERROR.
-- **Events** in the Windows **Application** log, source `PI-Scheduler`: 1001 Error / 1002 Warning when the status changes (repeated at most once an hour while it persists), 1000 Information when it recovers, 1010 Error once per newly failed job.
+- **Events** in the Windows **Application** log, source `PI-Scheduler`: 1001 Error / 1002 Warning when the status changes (repeated at most once an hour while it persists), 1000 Information when it recovers, 1010 Error once per newly failed job, 1011 Warning once per newly PARTIAL job.
 - **Nobody is notified actively:** there is no e-mail or chat channel. Look at Event Viewer → Windows Logs → Application (source `PI-Scheduler`), or let a monitoring agent collect those events.
 - **Trial run without writing anything:** `powershell -NoProfile -ExecutionPolicy Bypass -File C:\PI\tools\monitor\pi_health_check.ps1 -DryRun` (`-MaxAgeSeconds 1` forces a heartbeat ERROR to test the alert path).
 - Source and task definition: [`deploy/windows/`](../deploy/windows/README.md).
@@ -411,6 +416,15 @@ The scheduler reads `scheduler.toml` and `.env` **once at start**, but reads the
 - `python -m scripts.pi_jobs status`: per schedule the configuration state and `would_run`, the last checks, active jobs and process heartbeats.
 - `python -m scripts.pi_jobs list --status FAILED`, then `requeue <id>` (version-aware) after fixing the cause.
 - Each process start adds one `pi_jobs.process_heartbeat` row (keyed by host and PID); old rows are harmless and are removed only by the owner (see [Retention](#retention)).
+
+## MOSDAC wind (paused)
+
+Since 2026-11-26 the wind endpoint returns HTTP 500 for 5 of the 8 plants (ASPL, GSPL_GAP, GSPL_GUM, NSPL, TSPL); ESEPL, PSPL and RSPL work, and solar works for all 8. The 867 rows of the 25-Nov series for the 3 working plants are stored. `MOSDAC_WIND` is paused in the database (`pi_jobs disable MOSDAC_WIND`, schema owner); the file keeps `enabled = true`, so re-enabling is one command.
+
+**Recovery plan:**
+1. Test the failing plants without storing anything, e.g. `python -m scripts.ingest_mosdac wind --dry-run --location ASPL` (repeat for each). Every plant must answer with data.
+2. As the schema owner: `python -m scripts.pi_jobs enable MOSDAC_WIND` (owner identity as for the migration). The next check (at most 1 hour) queues the current series; the job fetches only the plants that do not hold it yet.
+3. Watch `pi_jobs list --schedule MOSDAC_WIND`: SUCCEEDED, or PARTIAL with the plants that still fail (the health check raises a PARTIAL warning, event 1011).
 
 ## Activation checklist
 
@@ -433,7 +447,7 @@ Every step needs its own approval.
 | `IEX_DAM`, `IEX_GDAM`, `IEX_RTM` | yes | |
 | `GRID_INDIA_PSP` (all nine sections) | yes | migration 0010 (ACE columns) is part of the same chain, before 0011 |
 | `NPP_DEMAND`, `NPP_GENERATION` | yes | |
-| `MOSDAC_SOLAR`, `MOSDAC_WIND` | yes | wind endpoint has had HTTP 500 outages; independent of solar |
+| `MOSDAC_SOLAR`, `MOSDAC_WIND` | yes | solar active; wind paused in the database (HTTP 500 for 5 plants since 26-Nov) |
 | `OPEN_METEO_FORECAST`, `OPEN_METEO_HISTORICAL` | **only for non-commercial use** | free endpoint, no API key, fewer than 10,000 calls a day, CC BY 4.0 attribution. Disabled by default. Activate only after confirming the use is non-commercial; any commercial use needs a paid subscription and `OPEN_METEO_PLAN=commercial` with `OPEN_METEO_API_KEY` |
 
 ## Retention
@@ -463,6 +477,10 @@ COMMIT;
 
 ## Known limitations
 
+- **MOSDAC wind outage (2026-11-26).** The wind endpoint answers HTTP 500 within about 100 ms for ASPL, GSPL_GAP, GSPL_GUM, NSPL and TSPL (solar works for all 8 plants). The check probes one reference plant (ESEPL), which works, so it cannot see a per-plant outage; the job's per-plant results and PARTIAL status do.
+- **Open-Meteo is not activated.** Its free API is for non-commercial use only (the terms list "undisclosed research at commercial entities" as commercial). Activating it needs a written decision that the internal use is non-commercial, or a paid plan (`OPEN_METEO_PLAN=commercial` with `OPEN_METEO_API_KEY`).
+- **NPP volume.** NPP updates today's data during the day; each newer `updated_on` is a new version and a small job (up to about 48 per day per kind; only changed rows are inserted, each fetch is kept as a raw document).
+- **Probe 404s are logged at ERROR.** A check for a not-yet-published CEA report logs `HTTP GET ... returned 404` at ERROR level in `pi-scheduler.log` although the check correctly records NOT_YET_PUBLISHED; harmless, but noisy.
 - **Queue SQL tested on PostgreSQL inside rolled-back transactions only.** `tests/integration/test_scheduler_queue.py` passed on PostgreSQL 18.7 as `pi_app` (the retention test needs the owner). The unit tests use an in-memory repository with the same semantics, plus a recording fake connection that checks which statements share a transaction. No job has yet run end to end through a real runner from the queue.
 - **Task Scheduler cannot stop gracefully or hold back a configuration error.** Graceful stops need the stop files; ending a task kills the process (jobs are recovered through their leases). Exit code 2 is retried by the watchdog every 5 minutes.
 - **`LOCAL SERVICE` is a shared identity.** Other Windows services running as `LOCAL SERVICE` can also read `.env` and write into `C:\PI\logs`, `C:\PI\raw_data` and `C:\PI\run`. A dedicated account would isolate this.
