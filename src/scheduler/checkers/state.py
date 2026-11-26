@@ -34,6 +34,9 @@ class SourceState(Protocol):
     def mosdac_latest_series(self, location_code: str, kind: str = "solar") -> datetime | None:
         """Latest stored ``series_start_at`` for a location and kind (``solar`` or ``wind``)."""
 
+    def mosdac_series_locations(self, kind: str, series_start: datetime) -> set[str]:
+        """Locations that already have rows of the forecast series starting at ``series_start``."""
+
 
 class PostgresSourceState:
     def __init__(self, database: Any, schema: str = "pi") -> None:
@@ -104,3 +107,9 @@ class PostgresSourceState:
         rows = self._rows(f"SELECT max(series_start_at) FROM {self.s}.{table} WHERE location_code = :c",
                           {"c": location_code})
         return rows[0][0] if rows else None
+
+    def mosdac_series_locations(self, kind: str, series_start: datetime) -> set[str]:
+        table = self.MOSDAC_TABLES[kind]       # fixed whitelist
+        rows = self._rows(f"SELECT DISTINCT location_code FROM {self.s}.{table} WHERE series_start_at = :s",
+                          {"s": series_start})
+        return {r[0] for r in rows}

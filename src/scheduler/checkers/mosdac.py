@@ -15,7 +15,10 @@ instead of one per plant) and compares its series start with the newest stored o
 * HTTP 5xx / timeouts -> source error for THIS schedule only, re-checked at its next interval.
 
 Item ``"series|<series start>"``. The job target uses the unchanged runner interface
-``run_mosdac("solar" | "wind")``; the MOSDAC pipeline itself is not modified.
+``run_mosdac("solar" | "wind")`` plus the detected ``series_start``; the MOSDAC pipeline itself is not modified.
+The job processes every plant independently (``executors.run_mosdac_target``): plants that already hold the
+series are skipped, so a retry requests only the plants that failed, and a job that ends with some plants
+stored and some failed is recorded as PARTIAL (see ``worker.decide``).
 """
 
 from __future__ import annotations
@@ -68,7 +71,7 @@ class MosdacChecker(AvailabilityChecker):
                                                series_start=series_start.isoformat())
         detection = Detection(
             f"series|{series_start.isoformat()}", series_start.isoformat(),
-            {"runner": "mosdac", "command": self.kind},
+            {"runner": "mosdac", "command": self.kind, "series_start": series_start.isoformat()},
             {"kind": self.kind, "reference_location": code, "series_start": series_start.isoformat(),
              "stored_series_start": stored.isoformat() if stored else None, "points": len(parsed.records),
              "revision": False})

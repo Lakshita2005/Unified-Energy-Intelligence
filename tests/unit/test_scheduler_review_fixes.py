@@ -116,7 +116,8 @@ def test_mosdac_wind_outage_does_not_fail_or_hide_solar_and_wind_recovers_indepe
     assert reports["MOSDAC_SOLAR"].outcome is CheckOutcome.NEW_DATA and len(reports["MOSDAC_SOLAR"].jobs_created) == 1
     assert reports["MOSDAC_WIND"].outcome is CheckOutcome.SOURCE_ERROR and reports["MOSDAC_WIND"].jobs_created == []
     [solar_job] = m.repo.jobs()
-    assert solar_job.target == {"runner": "mosdac", "command": "solar"}     # solar only: wind cannot fail it
+    assert {k: solar_job.target[k] for k in ("runner", "command")} == {"runner": "mosdac", "command": "solar"}
+    assert "series_start" in solar_job.target                              # solar only: wind cannot fail it
     worker.run_once()
     assert m.repo.job(solar_job.job_id).status is JobStatus.SUCCEEDED and m.executed == ["solar"]
     assert m.repo.get_watermark("MOSDAC_SOLAR", solar_job.item_key).status is WatermarkStatus.INGESTED

@@ -48,19 +48,28 @@ _WATERMARK = {JobStatus.SUCCEEDED: WatermarkStatus.INGESTED, JobStatus.PARTIAL: 
 
 
 def watermark_for(status: JobStatus, outcome: ExecutionOutcome) -> WatermarkStatus:
-    if status is JobStatus.FAILED:
+    # FAILED, or PARTIAL because independent units failed (decide): the item is retried after the failure
+    # cool-down (TRANSIENT) or quarantined (PERMANENT); for a MOSDAC series only the missing plants are fetched.
+    if status is JobStatus.FAILED or (status is JobStatus.PARTIAL and outcome.status is JobStatus.FAILED):
         return (WatermarkStatus.QUARANTINED if outcome.error_class is not ErrorClass.TRANSIENT
                 else WatermarkStatus.FAILED)
     return _WATERMARK[status]
 
 
 def decide(job: Job, outcome: ExecutionOutcome) -> tuple[JobStatus, float | None]:
-    """(final status, retry delay in seconds or None) for an attempt outcome."""
+    """(final status, retry delay in seconds or None) for an attempt outcome.
+
+    A failed attempt whose runner stored some independent units (``detail["partial_success"]``, e.g. some
+    MOSDAC plants) is retried like any failure; once retries are used up it ends PARTIAL, not FAILED, because
+    data was stored. Its ``last_error`` names the failed units, and the health check reports it.
+    """
     if outcome.status is not JobStatus.FAILED:
         return outcome.status, None
     if outcome.error_class is ErrorClass.TRANSIENT and job.attempts < job.max_attempts:
         return JobStatus.RETRY_WAIT, backoff_seconds(job.attempts, base=job.backoff_base_seconds,
                                                      maximum=job.backoff_max_seconds)
+    if outcome.detail.get("partial_success"):
+        return JobStatus.PARTIAL, None
     return JobStatus.FAILED, None
 
 

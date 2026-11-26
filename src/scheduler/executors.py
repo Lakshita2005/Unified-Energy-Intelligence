@@ -17,7 +17,7 @@ Re-running a job is always safe: the pipelines skip byte-identical documents and
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from config.settings import Settings
@@ -131,14 +131,58 @@ def run_open_meteo_target(target: dict[str, Any], settings: Settings) -> tuple[l
     return [(o.status, o.result, o.error) for o in summary.outcomes], {}
 
 
-def run_mosdac_target(target: dict[str, Any], settings: Settings) -> tuple[list[RunTriple], dict[str, Any]]:
-    from src.pipelines.mosdac.runner import run_mosdac
+def mosdac_stored_locations(settings: Settings, kind: str, series_start: datetime) -> set[str]:
+    """Plants that already hold the forecast series (read-only; replaced in tests)."""
+    from src.common.database import DatabaseManager
+    from src.scheduler.checkers.state import PostgresSourceState
 
-    summary = run_mosdac(target.get("command", "all"), locations=target.get("locations"), settings=settings)
-    runs: list[RunTriple] = [(r.status, r, r.error) for r in summary.runs.values()]
-    runs += [(RunStatus.FAILED, None, f"MosdacLocationError: {code}: {error}")
-             for code, error in summary.location_errors.items()]
-    return runs, {}
+    database = DatabaseManager.from_settings(settings)
+    try:
+        return PostgresSourceState(database, settings.db_schema).mosdac_series_locations(kind, series_start)
+    finally:
+        database.dispose()
+
+
+def run_mosdac_target(target: dict[str, Any], settings: Settings) -> tuple[list[RunTriple], dict[str, Any]]:
+    """Every plant independently (one ingestion run per plant and kind, as before).
+
+    With the detected ``series_start`` in the target, plants that already hold that series are skipped: a retry
+    requests only the plants that failed, and nothing is loaded twice. ``detail["plants"]`` records each plant
+    (``loaded`` / ``already_stored`` / ``failed``); ``partial_success`` tells :func:`worker.decide` that some
+    plants are stored although others failed (final status PARTIAL instead of FAILED once retries are used up).
+    """
+    from src.pipelines.mosdac.runner import load_locations, run_mosdac
+
+    command = target.get("command", "all")
+    single_kind = command in ("solar", "wind")
+    series = target.get("series_start")
+    todo = target.get("locations")                 # None = every configured plant (the runner decides)
+    plants: dict[str, str] = {}
+    detail: dict[str, Any] = {"series_start": series, "plants": plants}
+    if series and single_kind:
+        codes = list(todo or sorted(load_locations(settings)))
+        already = mosdac_stored_locations(settings, command, datetime.fromisoformat(series)) & set(codes)
+        plants.update({code: "already_stored" for code in sorted(already)})
+        todo = [code for code in codes if code not in already]
+        if not todo:
+            detail["all_stored"] = True
+            return [], detail
+    summary = run_mosdac(command, locations=todo, settings=settings)
+    runs: list[RunTriple] = []
+    for run_key, result in summary.runs.items():
+        code, kind = run_key if isinstance(run_key, tuple) else (run_key, command)
+        key = code if single_kind else f"{code}/{kind}"
+        failed = result.status is RunStatus.FAILED
+        plants[key] = "failed" if failed else "loaded"
+        error = f"{result.error or 'unknown error'} [{key}]" if failed else result.error
+        runs.append((result.status, result, error))
+    for code, error in summary.location_errors.items():
+        plants[code] = "failed"
+        runs.append((RunStatus.FAILED, None, f"MosdacLocationError: {code}: {error}"))
+    detail["plants_failed"] = sorted(k for k, v in plants.items() if v == "failed")
+    detail["plants_ok"] = sorted(k for k, v in plants.items() if v != "failed")
+    detail["partial_success"] = bool(detail["plants_failed"] and detail["plants_ok"])
+    return runs, detail
 
 
 RUNNERS: dict[str, Runner] = {
@@ -170,6 +214,8 @@ def summarise(runs: list[RunTriple], detail: dict[str, Any]) -> ExecutionOutcome
     documents = sum(r.documents_processed for _s, r, _e in runs if r is not None)
     outcome.detail["documents_processed"] = documents
     outcome.detail["run_statuses"] = [s.value for s, _r, _e in runs]
+    if not runs and detail.get("all_stored"):      # e.g. a MOSDAC retry whose plants are all stored by now
+        return outcome
     if not runs:
         outcome.status, outcome.error, outcome.error_class = (
             JobStatus.FAILED, "the runner returned no ingestion run", ErrorClass.PERMANENT)

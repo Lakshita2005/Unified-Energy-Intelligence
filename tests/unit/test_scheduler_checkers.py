@@ -310,7 +310,8 @@ def test_mosdac_new_series_detected_once(tmp_path) -> None:
     series = datetime(2030, 1, 10, 5, 30, tzinfo=IST)
     new = MosdacChecker(sched).check(ctx(sched, now=ist(25, 9), state=FakeState(), handler=route, cfg=cfg))
     [d] = new.detections
-    assert d.item_key == f"series|{series.isoformat()}" and d.target == {"runner": "mosdac", "command": "solar"}
+    assert d.item_key == f"series|{series.isoformat()}"
+    assert d.target == {"runner": "mosdac", "command": "solar", "series_start": series.isoformat()}
     assert len(route.requests) == 1                                     # one probe, not 16 requests
     same = MosdacChecker(sched).check(ctx(sched, now=ist(25, 12), state=FakeState(mosdac={"ESEPL": series}),
                                           handler=route, cfg=cfg))
