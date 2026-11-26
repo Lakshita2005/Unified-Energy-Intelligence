@@ -1,0 +1,64 @@
+﻿<?xml version="1.0"?>
+<!-- PROPOSED, NOT REGISTERED. \PI\pi-worker. Registered DISABLED; enabling the task = activation step. -->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>PI ingestion worker (C:\PI\app, docs\scheduler.md). 2 job slots; one running job per source group.</Description>
+    <URI>\PI\pi-worker</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- start 2 minutes after boot (PostgreSQL is an automatic service and is normally up by then) -->
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT2M</Delay>
+    </BootTrigger>
+    <!-- watchdog: every 5 minutes, indefinitely. If the process is running, IgnoreNew makes this a no-op;
+         if it exited (crash, exit 1, database down at boot) it is started again within 5 minutes. -->
+    <TimeTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2026-11-26T00:00:00</StartBoundary>
+      <Repetition>
+        <Interval>PT5M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <!-- NT AUTHORITY\LOCAL SERVICE: built-in, no password, no account to create, no admin rights.
+         Runs whether or not anyone is logged on. -->
+    <Principal id="Author">
+      <UserId>S-1-5-19</UserId>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <Enabled>false</Enabled>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <WakeToRun>false</WakeToRun>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <Hidden>false</Hidden>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\PI\venv-svc\Scripts\python.exe</Command>
+      <Arguments>-m scripts.pi_worker run</Arguments>
+      <WorkingDirectory>C:\PI\app</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+

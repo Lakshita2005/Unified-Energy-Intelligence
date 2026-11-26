@@ -283,7 +283,7 @@ Two Windows **Task Scheduler** tasks run the console processes. Task Scheduler i
 | Restart on failure | every 1 min, 3 times (covers only a failure to **launch**, not an exit code) | same |
 | Conditions | none (no battery, idle or network conditions); start when available after a missed trigger | same |
 
-The definitions are in `C:\PI\tools\tasks\task_pi-scheduler.xml` and `task_pi-worker.xml`. Registered, disabled, with (elevated PowerShell):
+The definitions are in `C:\PI\tools\tasks\task_pi-scheduler.xml` and `task_pi-worker.xml`; the versioned copies are in [`deploy/windows/`](../deploy/windows/README.md). Registered, disabled, with (elevated PowerShell):
 
 ```powershell
 foreach ($t in 'pi-scheduler', 'pi-worker') {
@@ -389,7 +389,24 @@ The scheduler reads `scheduler.toml` and `.env` **once at start**, but reads the
 
 ### Monitoring
 
-- `python -m scripts.pi_jobs health --max-age 180`: exit code 0 only if a scheduler and a worker heartbeat are fresher than 180 s. No monitoring job runs it yet.
+**Health-check task `\PI\pi-health`** (enabled 2026-11-26): every 5 minutes (and 10 minutes after boot) Task Scheduler runs `C:\PI\tools\monitor\pi_health_check.ps1` as `LOCAL SERVICE` (Windows PowerShell, 3-minute limit). It only calls `pi_jobs health`, `status` and `list`, so it reads the database as `pi_app` and writes nothing there.
+
+| Check | Level | Condition |
+|---|---|---|
+| `HEARTBEAT` | ERROR | the scheduler or worker heartbeat is older than 180 s |
+| `FAILED` | ERROR | a job reached FAILED since the previous run (each job is reported once) |
+| `CONFIG` | WARNING | a schedule enabled in the file is out of sync with `pi_jobs.schedule` |
+| `STALE` | WARNING | a schedule that should run has had no availability check for more than 7 hours |
+| `QUERY` | ERROR | `pi_jobs` itself failed (database down, configuration error) |
+
+- **Results:** one JSON line per run in `C:\PI\logs\pi-health.log` (rotated at 5 MB); the state between runs in `C:\PI\run\pi-health.state.json`; the task's last result is `0` OK, `1` WARNING, `2` ERROR.
+- **Events** in the Windows **Application** log, source `PI-Scheduler`: 1001 Error / 1002 Warning when the status changes (repeated at most once an hour while it persists), 1000 Information when it recovers, 1010 Error once per newly failed job.
+- **Nobody is notified actively:** there is no e-mail or chat channel. Look at Event Viewer → Windows Logs → Application (source `PI-Scheduler`), or let a monitoring agent collect those events.
+- **Trial run without writing anything:** `powershell -NoProfile -ExecutionPolicy Bypass -File C:\PI\tools\monitor\pi_health_check.ps1 -DryRun` (`-MaxAgeSeconds 1` forces a heartbeat ERROR to test the alert path).
+- Source and task definition: [`deploy/windows/`](../deploy/windows/README.md).
+
+**Commands:**
+- `python -m scripts.pi_jobs health --max-age 180`: exit code 0 only if a scheduler and a worker heartbeat are fresher than 180 s.
 - `python -m scripts.pi_jobs status`: per schedule the configuration state and `would_run`, the last checks, active jobs and process heartbeats.
 - `python -m scripts.pi_jobs list --status FAILED`, then `requeue <id>` (version-aware) after fixing the cause.
 - Each process start adds one `pi_jobs.process_heartbeat` row (keyed by host and PID); old rows are harmless and are removed only by the owner (see [Retention](#retention)).
@@ -448,7 +465,7 @@ COMMIT;
 - **Queue SQL tested on PostgreSQL inside rolled-back transactions only.** `tests/integration/test_scheduler_queue.py` passed on PostgreSQL 18.7 as `pi_app` (the retention test needs the owner). The unit tests use an in-memory repository with the same semantics, plus a recording fake connection that checks which statements share a transaction. No job has yet run end to end through a real runner from the queue.
 - **Task Scheduler cannot stop gracefully or hold back a configuration error.** Graceful stops need the stop files; ending a task kills the process (jobs are recovered through their leases). Exit code 2 is retried by the watchdog every 5 minutes.
 - **`LOCAL SERVICE` is a shared identity.** Other Windows services running as `LOCAL SERVICE` can also read `.env` and write into `C:\PI\logs`, `C:\PI\raw_data` and `C:\PI\run`. A dedicated account would isolate this.
-- **Health is not monitored automatically.** `pi_jobs health` exists, but nothing runs it on a schedule or raises an alert yet.
+- **No push notifications.** `\PI\pi-health` writes alerts to the Application event log and `pi-health.log` only; nobody is notified unless someone, or a monitoring agent, reads them.
 - **No committed-row concurrency test.** Two real processes racing on committed rows (claim, enqueue) are not tested, because `pi_app` cannot delete the rows afterwards. A one-off owner-run test in a scratch schema would cover it.
 - **Checks download the probe data.** CEA daily files, the IEX snapshot and NPP days are downloaded by the check and again by the job: one extra request per new item. HEAD requests were not used, because HEAD support is unverified.
 - **Open-Meteo is cadence-based.** No issue time or verified model-run metadata exists, so its refresh follows the slots, not detection.
