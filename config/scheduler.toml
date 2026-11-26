@@ -1,7 +1,8 @@
 # Availability-based scheduler configuration (src/scheduler, docs/scheduler.md).
 #
 # ENABLED (approved 2026-11-26): IEX_DAM, IEX_GDAM, IEX_RTM, GRID_INDIA_PSP, CEA_COAL_DAILY, CEA_DGR_DAILY,
-# CEA_PSP_MONTHLY, MOSDAC_SOLAR, MOSDAC_WIND. Every other schedule is disabled.
+# CEA_PSP_MONTHLY, MOSDAC_SOLAR, MOSDAC_WIND, NPP_DEMAND, NPP_GENERATION. Every other schedule (Open-Meteo) is
+# disabled. MOSDAC_WIND is paused in the database (pi_jobs disable) while its endpoint fails for 5 plants.
 # A schedule runs only when ALL of these hold (re-checked every tick):
 #   1. SCHEDULER_GLOBAL_ENABLE=true in the environment (.env),
 #   2. enabled = true below,
@@ -143,7 +144,7 @@ late_after_hours = 16
 key = "NPP_DEMAND"
 description = "NPP All-India demand met snapshots (every 2-4 minutes at the source)"
 checker = "npp"
-enabled = false
+enabled = true
 source = "NPP"
 datasets = ["NPP_DEMAND"]
 lock_group = "NPP"
@@ -155,7 +156,7 @@ kind = "demand"
 key = "NPP_GENERATION"
 description = "NPP All-India generation by source snapshots"
 checker = "npp"
-enabled = false
+enabled = true
 source = "NPP"
 datasets = ["NPP_GENERATION"]
 lock_group = "NPP"

@@ -167,7 +167,8 @@ def test_both_iex_outcomes_are_stored(repo, connection, manager, monkeypatch, sn
 
 APPROVED_ENABLED = {"IEX_DAM", "IEX_GDAM", "IEX_RTM", "GRID_INDIA_PSP",           # approved 2026-11-26
                     "CEA_COAL_DAILY", "CEA_DGR_DAILY", "CEA_PSP_MONTHLY",         # approved 2026-11-26
-                    "MOSDAC_SOLAR", "MOSDAC_WIND"}                                # approved 2026-11-26
+                    "MOSDAC_SOLAR", "MOSDAC_WIND",                                # approved 2026-11-26
+                    "NPP_DEMAND", "NPP_GENERATION"}                               # approved 2026-11-26
 
 
 def test_only_approved_schedules_are_enabled(connection) -> None:
