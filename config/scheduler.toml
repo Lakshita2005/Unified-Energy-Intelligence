@@ -1,6 +1,7 @@
 # Availability-based scheduler configuration (src/scheduler, docs/scheduler.md).
 #
-# ENABLED (approved 2026-11-26): IEX_DAM, IEX_GDAM, IEX_RTM, GRID_INDIA_PSP. Every other schedule is disabled.
+# ENABLED (approved 2026-11-26): IEX_DAM, IEX_GDAM, IEX_RTM, GRID_INDIA_PSP, CEA_COAL_DAILY, CEA_DGR_DAILY,
+# CEA_PSP_MONTHLY. Every other schedule is disabled.
 # A schedule runs only when ALL of these hold (re-checked every tick):
 #   1. SCHEDULER_GLOBAL_ENABLE=true in the environment (.env),
 #   2. enabled = true below,
@@ -39,7 +40,7 @@ catchup_max_days = 7
 key = "CEA_COAL_DAILY"
 description = "CEA daily coal stock report (published D+1, usually about 15:30 IST)"
 checker = "cea_daily"
-enabled = false
+enabled = true
 source = "CEA"
 datasets = ["CEA_COAL_STOCK_DAILY"]
 lock_group = "CEA"
@@ -54,7 +55,7 @@ late_after_hours = 48
 key = "CEA_DGR_DAILY"
 description = "CEA daily generation report: unit outages (dgr10) and plant daily (dgr2), D+1 about 17:00 IST"
 checker = "cea_daily"
-enabled = false
+enabled = true
 source = "CEA"
 datasets = ["CEA_DGR_DAILY"]
 lock_group = "CEA"
@@ -69,7 +70,7 @@ late_after_hours = 48
 key = "CEA_PSP_MONTHLY"
 description = "CEA monthly Power Supply Position (energy and peak); provisional issues re-checked for revision daily"
 checker = "cea_psp"
-enabled = false
+enabled = true
 source = "CEA"
 datasets = ["CEA_PSP_ENERGY_MONTHLY", "CEA_PSP_PEAK_MONTHLY"]
 lock_group = "CEA"
