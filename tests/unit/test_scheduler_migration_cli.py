@@ -139,4 +139,4 @@ def test_validate_config_command_runs_offline(capsys) -> None:
 
     assert main(["validate-config"], settings=settings(scheduler_global_enable=False)) == 0
     out = capsys.readouterr().out
-    assert "13 schedule(s), 7 enabled" in out and "SCHEDULER_GLOBAL_ENABLE=False" in out   # 7 approved 2026-11-26
+    assert "13 schedule(s), 9 enabled" in out and "SCHEDULER_GLOBAL_ENABLE=False" in out   # 9 approved 2026-11-26

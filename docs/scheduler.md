@@ -5,7 +5,7 @@ it into ingestion jobs. A worker executes those jobs by calling the existing ing
 pipelines themselves are unchanged.
 
 > **Status (2026-11-26): deployed, not active.**
-> - `IEX_DAM`, `IEX_GDAM`, `IEX_RTM`, `GRID_INDIA_PSP`, `CEA_COAL_DAILY`, `CEA_DGR_DAILY` and `CEA_PSP_MONTHLY` are `enabled = true` in `config/scheduler.toml` (approved 2026-11-26); every other schedule is disabled. They run only once the database switch (`pi_jobs enable`), `SCHEDULER_GLOBAL_ENABLE=true` and the started tasks are in place.
+> - `IEX_DAM`, `IEX_GDAM`, `IEX_RTM`, `GRID_INDIA_PSP`, `CEA_COAL_DAILY`, `CEA_DGR_DAILY`, `CEA_PSP_MONTHLY`, `MOSDAC_SOLAR` and `MOSDAC_WIND` are `enabled = true` in `config/scheduler.toml` (approved 2026-11-26); every other schedule is disabled. They run only once the database switch (`pi_jobs enable`), `SCHEDULER_GLOBAL_ENABLE=true` and the started tasks are in place.
 > - Migrations applied by the schema owner on 2026-11-26: `0009_mosdac → 0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs` (head). 0011 uses nothing from 0010, 0012 or 0013 (ordering only).
 > - `pi_jobs.schedule` holds the 13 synced schedules, all disabled in the database. The queue integration tests passed on PostgreSQL 18.7 as `pi_app` (9 passed; the retention test needs the owner).
 > - Two Windows Task Scheduler tasks, `\PI\pi-scheduler` and `\PI\pi-worker`, run as `LOCAL SERVICE` and are registered **Disabled**: see [deployment](#windows-server-2019-deployment-task-scheduler).

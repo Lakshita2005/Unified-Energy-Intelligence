@@ -1,7 +1,7 @@
 # Availability-based scheduler configuration (src/scheduler, docs/scheduler.md).
 #
 # ENABLED (approved 2026-11-26): IEX_DAM, IEX_GDAM, IEX_RTM, GRID_INDIA_PSP, CEA_COAL_DAILY, CEA_DGR_DAILY,
-# CEA_PSP_MONTHLY. Every other schedule is disabled.
+# CEA_PSP_MONTHLY, MOSDAC_SOLAR, MOSDAC_WIND. Every other schedule is disabled.
 # A schedule runs only when ALL of these hold (re-checked every tick):
 #   1. SCHEDULER_GLOBAL_ENABLE=true in the environment (.env),
 #   2. enabled = true below,
@@ -171,7 +171,7 @@ kind = "generation"
 key = "MOSDAC_SOLAR"
 description = "MOSDAC solar energy forecast for the configured plants; new series detected via one probe"
 checker = "mosdac"
-enabled = false
+enabled = true
 source = "MOSDAC"
 datasets = ["MOSDAC_SOLAR_FORECAST"]
 lock_group = "MOSDAC"
@@ -183,7 +183,7 @@ kind = "solar"
 key = "MOSDAC_WIND"
 description = "MOSDAC wind energy forecast for the configured plants (endpoint has had HTTP 500 outages)"
 checker = "mosdac"
-enabled = false
+enabled = true
 source = "MOSDAC"
 datasets = ["MOSDAC_WIND_FORECAST"]
 lock_group = "MOSDAC"
