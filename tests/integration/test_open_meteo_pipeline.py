@@ -288,7 +288,9 @@ def test_one_failing_location_does_not_affect_others(
             return httpx.Response(400, json={"error": True, "reason": "simulated"})
         return httpx.Response(200, content=response_bytes())
 
-    summary = _run(conn, settings, storage, MockOpenMeteo(by_location), locations=None)
+    # The two locations explicitly: an all-locations run would also include the production plants registered in
+    # pi.weather_location since 2026-11-20 (and this mock returns one identical body for every location).
+    summary = _run(conn, settings, storage, MockOpenMeteo(by_location), locations=["TEST_SITE_A", "TEST_SITE_B"])
 
     statuses = {o.location_code: o.status for o in summary.outcomes}
     assert statuses == {"TEST_SITE_A": RunStatus.SUCCESS, "TEST_SITE_B": RunStatus.FAILED}
@@ -325,7 +327,10 @@ coordinate_source = "Synthetic test fixture"
     explicit = _run(conn, settings, storage, MockOpenMeteo(response_bytes()), locations=["TEST_ONLY_POINT"])
     default = _run(conn, settings, storage, MockOpenMeteo(response_bytes()), locations=None)
 
-    assert [o.location_code for o in default.outcomes] == ["TEST_SITE_A", "TEST_SITE_B"]
+    default_codes = [o.location_code for o in default.outcomes]
+    # registered production plants may be included; the technical test point never is, unless requested
+    assert [c for c in default_codes if c.startswith("TEST_")] == ["TEST_SITE_A", "TEST_SITE_B"]
+    assert "TEST_ONLY_POINT" not in default_codes
     assert explicit.outcomes[0].status is RunStatus.SUCCESS and len(_rows(conn, "TEST_ONLY_POINT")) == 3
 
 

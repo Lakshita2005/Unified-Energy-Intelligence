@@ -13,6 +13,7 @@ from alembic.runtime.environment import EnvironmentContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DBAPIError
 
 from config.settings import PROJECT_ROOT
 from src.common.database import Base
@@ -25,7 +26,19 @@ def _config() -> Config:
 
 
 def current_revision(connection: Connection) -> str | None:
-    return connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
+    """The applied revision, or None when this role may not read it.
+
+    The application role ``pi_app`` has no SELECT on ``public.alembic_version`` (by design). The read runs in a
+    savepoint, so a permission error does not abort the caller's outer transaction; callers then treat the
+    database as already migrated (fixtures only migrate when they see an older, known revision).
+    """
+    try:
+        with connection.begin_nested():
+            return connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "42501":          # insufficient_privilege
+            return None
+        raise
 
 
 def migrate_in_transaction(connection: Connection, target: str, *, downgrade: bool = False) -> None:
