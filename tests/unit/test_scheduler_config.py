@@ -28,7 +28,11 @@ def at(hhmm: str, day: int = 25) -> datetime:
 
 
 # --------------------------------------------------------------------------- shipped configuration
-def test_shipped_configuration_is_valid_and_every_schedule_is_disabled() -> None:
+# Activation is approved schedule by schedule; extend this set only together with that approval.
+APPROVED_ENABLED = {"IEX_DAM", "IEX_GDAM", "IEX_RTM", "GRID_INDIA_PSP"}      # approved 2026-11-26
+
+
+def test_shipped_configuration_is_valid_and_only_approved_schedules_are_enabled() -> None:
     config = load_scheduler_config(SHIPPED)
     checkers = build_checkers(config)          # every checker's parameters are validated too
     assert set(config.schedules) == {
@@ -36,7 +40,7 @@ def test_shipped_configuration_is_valid_and_every_schedule_is_disabled() -> None
         "NPP_DEMAND", "NPP_GENERATION", "MOSDAC_SOLAR", "MOSDAC_WIND", "OPEN_METEO_FORECAST",
         "OPEN_METEO_HISTORICAL"}
     assert set(checkers) == set(config.schedules)
-    assert config.enabled() == []
+    assert {s.key for s in config.enabled()} == APPROVED_ENABLED
     for s in config.schedules.values():
         assert s.timezone == "Asia/Kolkata"
         assert s.catchup_max_days <= 7

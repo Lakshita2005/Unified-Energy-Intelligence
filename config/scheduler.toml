@@ -1,6 +1,7 @@
 # Availability-based scheduler configuration (src/scheduler, docs/scheduler.md).
 #
-# EVERY SCHEDULE IS DISABLED. A schedule runs only when ALL of these hold (re-checked every tick):
+# ENABLED (approved 2026-11-26): IEX_DAM, IEX_GDAM, IEX_RTM, GRID_INDIA_PSP. Every other schedule is disabled.
+# A schedule runs only when ALL of these hold (re-checked every tick):
 #   1. SCHEDULER_GLOBAL_ENABLE=true in the environment (.env),
 #   2. enabled = true below,
 #   3. this exact configuration has been copied to the database: python -m scripts.pi_jobs sync-config
@@ -12,7 +13,7 @@
 # Activation candidates (2026-11-25: the company confirmed permission to use the source data for
 # internal operations): CEA_COAL_DAILY, CEA_DGR_DAILY, CEA_PSP_MONTHLY, IEX_DAM, IEX_GDAM, IEX_RTM,
 # GRID_INDIA_PSP (all nine sections), NPP_DEMAND, NPP_GENERATION, MOSDAC_SOLAR, MOSDAC_WIND.
-# They stay disabled until activation is approved schedule by schedule.
+# The others stay disabled until activation is approved schedule by schedule.
 #
 # OPEN_METEO_FORECAST / OPEN_METEO_HISTORICAL use the FREE endpoint (https://api.open-meteo.com/v1/forecast,
 # OPEN_METEO_PLAN=free, no API key): NON-COMMERCIAL USE ONLY, fewer than 10,000 API calls a day, data under
@@ -83,7 +84,7 @@ months_back = 3
 key = "IEX_DAM"
 description = "IEX Day-Ahead Market: results for D are published on D-1 afternoon"
 checker = "iex"
-enabled = false
+enabled = true
 source = "IEX"
 datasets = ["IEX_DAM"]
 lock_group = "IEX"
@@ -97,7 +98,7 @@ late_after_hours = 16.5
 key = "IEX_GDAM"
 description = "IEX Green Day-Ahead Market: results for D are published on D-1 afternoon"
 checker = "iex"
-enabled = false
+enabled = true
 source = "IEX"
 datasets = ["IEX_GDAM"]
 lock_group = "IEX"
@@ -111,7 +112,7 @@ late_after_hours = 16.5
 key = "IEX_RTM"
 description = "IEX Real-Time Market: blocks clear through the day; partial days are loaded incrementally"
 checker = "iex"
-enabled = false
+enabled = true
 source = "IEX"
 datasets = ["IEX_RTM"]
 lock_group = "IEX"
@@ -124,7 +125,7 @@ market = "rtm"
 key = "GRID_INDIA_PSP"
 description = "NLDC Daily PSP workbook (all nine sections), published D+1 about 10:00-12:30 IST; revisions later"
 checker = "grid_india_psp"
-enabled = false
+enabled = true
 source = "GRID_INDIA"
 datasets = ["GRID_INDIA_PSP_DAILY", "GRID_INDIA_PSP_STATES", "GRID_INDIA_GENERATION", "GRID_INDIA_PSP_OUTAGE",
             "GRID_INDIA_EXCHANGE", "GRID_INDIA_PSP_IR_LINES", "GRID_INDIA_PSP_INTL_LINES",

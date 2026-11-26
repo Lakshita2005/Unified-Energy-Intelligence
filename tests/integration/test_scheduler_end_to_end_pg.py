@@ -165,9 +165,11 @@ def test_both_iex_outcomes_are_stored(repo, connection, manager, monkeypatch, sn
     assert repo.get_watermark("QA_E2E_IEX", "2026-11-24").status is mark
 
 
-def test_every_configured_schedule_is_still_disabled(connection) -> None:
-    live = Settings()
-    config, _ = load_config(live)
-    assert config.enabled() == []                                                    # file
-    assert live.scheduler_global_enable is False                                     # .env
-    assert connection.execute(text("SELECT count(*) FROM pi_jobs.schedule WHERE enabled")).scalar() == 0   # database
+APPROVED_ENABLED = {"IEX_DAM", "IEX_GDAM", "IEX_RTM", "GRID_INDIA_PSP"}      # approved 2026-11-26
+
+
+def test_only_approved_schedules_are_enabled(connection) -> None:
+    config, _ = load_config(Settings())
+    assert {s.key for s in config.enabled()} <= APPROVED_ENABLED                              # file
+    enabled_in_db = {r[0] for r in connection.execute(text("SELECT schedule_key FROM pi_jobs.schedule WHERE enabled"))}
+    assert enabled_in_db <= APPROVED_ENABLED                                                  # database
