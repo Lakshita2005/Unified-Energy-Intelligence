@@ -1,0 +1,68 @@
+# Weather locations for Open-Meteo ingestion (src/pipelines/open_meteo).
+#
+# Format and field rules: see config/weather_locations.example.toml.
+# The eight solar plants below use the same codes and coordinates as
+# config/mosdac_locations.toml.
+#
+# None of these codes exists in pi.plant (checked 2026-11-20), so no plant_code
+# is set. Registered locations are never moved: once a code is registered in
+# pi.weather_location, its coordinates must not change here (use a new code).
+#
+# The technical test point TEST_ONLY_DELHI_GRID is intentionally NOT listed here
+# (it lives in config/weather_locations.test_only.toml).
+
+[[location]]
+code = "ESEPL"
+name = "ESEPL"
+latitude = 17.4042
+longitude = 77.3753
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "NSPL"
+name = "NSPL"
+latitude = 12.0981737
+longitude = 76.8406883
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "ASPL"
+name = "ASPL"
+latitude = 16.40612
+longitude = 78.69986
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "GSPL_GAP"
+name = "GSPL_GAP"
+latitude = 16.6243
+longitude = 78.0630
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "GSPL_GUM"
+name = "GSPL_GUM"
+latitude = 17.7550
+longitude = 78.4220
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "PSPL"
+name = "PSPL"
+latitude = 18.41415
+longitude = 78.21599
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "RSPL"
+name = "RSPL"
+latitude = 18.7897
+longitude = 77.9162
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
+
+[[location]]
+code = "TSPL"
+name = "TSPL"
+latitude = 18.0256
+longitude = 78.7899
+coordinate_source = "Supplied by Resolven in the Open-Meteo configuration task brief (2026-11-20)"
