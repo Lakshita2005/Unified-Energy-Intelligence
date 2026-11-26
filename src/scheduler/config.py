@@ -151,6 +151,24 @@ class ScheduleConfig:
         local = moment.astimezone(self.tz).time()
         return any(w.contains(local) for w in self.windows)
 
+    def max_check_gap_seconds(self) -> float | None:
+        """Longest gap between two due checks over a day (``is_due`` simulated minute by minute over two days).
+
+        Used by the health check so that a schedule checked only in a window (e.g. 10:00 and 18:00) is not
+        reported as stale overnight. None when the schedule is never due.
+        """
+        t = datetime(2026, 1, 5, tzinfo=self.tz)
+        end, step = t + timedelta(days=2), timedelta(minutes=1)
+        last: datetime | None = None
+        gap = 0.0
+        while t < end:
+            if self.is_due(last, t):
+                if last is not None:
+                    gap = max(gap, (t - last).total_seconds())
+                last = t
+            t += step
+        return gap or None
+
     @property
     def hash(self) -> str:
         return config_hash(self.as_row())

@@ -6,9 +6,12 @@ Task Scheduler task \PI\pi-health as NT AUTHORITY\LOCAL SERVICE). Read-only towa
 Checks
   HEARTBEAT  ERROR    scheduler or worker heartbeat older than 180 s (pi_jobs health)
   FAILED     ERROR    a job reached FAILED since the previous run (each failed job is reported once)
+  PARTIAL    WARNING  a job ended PARTIAL with failed units, e.g. MOSDAC plants (each job reported once; a unit
+                      that keeps failing produces a new PARTIAL job after every failure cool-down)
   CONFIG     WARNING  a schedule enabled in the file is out of sync with pi_jobs.schedule (scheduler refuses it)
-  STALE      WARNING  a schedule that should run has had no availability check for more than 7 hours
-                      (the longest configured interval is 6 hours)
+  STALE      WARNING  a schedule that should run has had no availability check for longer than ITS OWN longest
+                      expected gap + 15 minutes (pi_jobs status: max_check_gap_s, from its every/windows), so a
+                      schedule checked only at 10:00 and 18:00 is not reported overnight
   QUERY      ERROR    the health / status command itself failed (database down, configuration error)
 
 Output
@@ -19,6 +22,7 @@ Output
      1001 Error        status ERROR (on change, then at most once an hour while it persists)
      1002 Warning      status WARNING (on change, then at most once an hour while it persists)
      1010 Error        one event per newly FAILED job
+     1011 Warning      one event per newly PARTIAL job with failed units
   Exit code: 0 OK, 1 WARNING, 2 ERROR (visible as the task's last result)
 
 -DryRun: evaluate and print only; writes no log, state or event.
@@ -28,7 +32,7 @@ param([switch]$DryRun, [int]$MaxAgeSeconds = 180)
 $ErrorActionPreference = 'Stop'
 $App = 'C:\PI\app'; $Py = 'C:\PI\venv-svc\Scripts\python.exe'
 $LogFile = 'C:\PI\logs\pi-health.log'; $StateFile = 'C:\PI\run\pi-health.state.json'
-$Source = 'PI-Scheduler'; $StaleHours = 7; $ReminderMinutes = 60
+$Source = 'PI-Scheduler'; $StaleHours = 7; $StaleGraceSeconds = 900; $ReminderMinutes = 60   # StaleHours: fallback only
 $now = Get-Date
 
 function Invoke-PiJobs([string[]]$PiArgs) {
@@ -49,9 +53,10 @@ function Add-Finding([string]$check, [string]$level, [string]$message) {
 }
 
 # --- previous state
-$state = [pscustomobject]@{ status = 'OK'; reported_failed = @(); last_alert = $null }
+$state = [pscustomobject]@{ status = 'OK'; reported_failed = @(); reported_partial = @(); last_alert = $null }
 if (Test-Path $StateFile) { try { $state = Get-Content $StateFile -Raw | ConvertFrom-Json } catch { } }
 $reported = @($state.reported_failed | ForEach-Object { [long]$_ })
+$reportedPartial = @($state.reported_partial | Where-Object { $_ } | ForEach-Object { [long]$_ })
 
 # --- HEARTBEAT
 $health = Invoke-PiJobs @('health', '--max-age', "$MaxAgeSeconds")
@@ -70,10 +75,12 @@ else {
   }
   $running = @($s.configuration | Where-Object { $_.would_run } | ForEach-Object { $_.schedule })
   $summary.active_schedules = $running
+  $gap = @{}; foreach ($c in @($s.configuration)) { if ($c.max_check_gap_s) { $gap[$c.schedule] = [double]$c.max_check_gap_s } }
   foreach ($row in @($s.schedules | Where-Object { $_.schedule_key -in $running })) {
     if (-not $row.last_check) { Add-Finding 'STALE' 'WARNING' "$($row.schedule_key): never checked"; continue }
-    $age = ($now - [datetime]$row.last_check).TotalHours
-    if ($age -gt $StaleHours) { Add-Finding 'STALE' 'WARNING' ("{0}: last check {1:N1} h ago" -f $row.schedule_key, $age) }
+    $limit = if ($gap.ContainsKey($row.schedule_key)) { $gap[$row.schedule_key] + $StaleGraceSeconds } else { $StaleHours * 3600 }
+    $age = ($now - [datetime]$row.last_check).TotalSeconds
+    if ($age -gt $limit) { Add-Finding 'STALE' 'WARNING' ("{0}: last check {1:N1} h ago (expected at least every {2:N1} h)" -f $row.schedule_key, ($age / 3600), (($limit - $StaleGraceSeconds) / 3600)) }
   }
 }
 
@@ -89,6 +96,20 @@ else {
     Add-Finding 'FAILED' 'ERROR' "job $($j.job_id) $($j.schedule_key) $($j.item_key): $err"
   }
   $reported = @($all | ForEach-Object { [long]$_.job_id })          # keep only ids still listed (bounded)
+}
+
+# --- PARTIAL jobs with failed units (last_error set) not reported before
+$partial = Invoke-PiJobs @('list', '--status', 'PARTIAL', '--limit', '200')
+$newPartial = @()
+if ($null -eq $partial.Json -and $partial.Code -ne 0) { Add-Finding 'QUERY' 'ERROR' "pi_jobs list failed (exit $($partial.Code))" }
+else {
+  $allPartial = @($partial.Json | Where-Object { $_ -and $_.job_id -and $_.last_error })
+  $newPartial = @($allPartial | Where-Object { [long]$_.job_id -notin $reportedPartial })
+  foreach ($j in $newPartial) {
+    $err = "$($j.last_error)"; if ($err.Length -gt 300) { $err = $err.Substring(0, 300) + '...' }
+    Add-Finding 'PARTIAL' 'WARNING' "job $($j.job_id) $($j.schedule_key) $($j.item_key): stored partly; failed: $err"
+  }
+  $reportedPartial = @($allPartial | ForEach-Object { [long]$_.job_id })
 }
 
 # --- overall
@@ -120,11 +141,12 @@ elseif ($overall -ne 'OK' -and ($changed -or ($now - $lastAlert).TotalMinutes -g
   $lastAlert = $now
 }
 foreach ($j in $newFailed) { Write-PiEvent 1010 'Error' "PI job $($j.job_id) FAILED: $($j.schedule_key) $($j.item_key)`r`n$($j.last_error)" }
+foreach ($j in $newPartial) { Write-PiEvent 1011 'Warning' "PI job $($j.job_id) PARTIAL: $($j.schedule_key) $($j.item_key)`r`n$($j.last_error)" }
 if ($eventError) { try { Add-Content -Path $LogFile -Value (@{ time = $now.ToString('s'); event_write_error = $eventError } | ConvertTo-Json -Compress) -Encoding UTF8 } catch { } }
 
 # --- state
 try {
-  @{ status = $overall; reported_failed = $reported; last_alert = $(if ($lastAlert -eq [datetime]::MinValue) { $null } else { $lastAlert.ToString('s') }) } |
+  @{ status = $overall; reported_failed = $reported; reported_partial = $reportedPartial; last_alert = $(if ($lastAlert -eq [datetime]::MinValue) { $null } else { $lastAlert.ToString('s') }) } |
     ConvertTo-Json -Compress | Set-Content -Path $StateFile -Encoding UTF8
 } catch { }
 exit ([array]::IndexOf(@('OK', 'WARNING', 'ERROR'), $overall))

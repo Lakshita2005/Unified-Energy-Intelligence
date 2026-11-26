@@ -290,7 +290,8 @@ def sync_report(config: SchedulerConfig, db: dict[str, tuple[bool, str]] | None,
                      "db_enabled": None if stored is None else stored[0],
                      "in_sync": None if stored is None else stored[1] == s.hash,
                      "file_hash": s.hash[:12], "db_hash": None if stored is None else stored[1][:12],
-                     "would_run": reason is None, "reason": reason})
+                     "would_run": reason is None, "reason": reason,
+                     "max_check_gap_s": s.max_check_gap_seconds()})
     return rows
 
 
