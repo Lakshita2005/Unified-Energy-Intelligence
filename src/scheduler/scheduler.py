@@ -142,7 +142,8 @@ class Scheduler:
         return active
 
     # ------------------------------------------------------------------ one tick
-    def tick(self, *, force: bool = False) -> list[CheckReport]:
+    def tick(self, *, force: bool = False, stop: StopSignal | None = None) -> list[CheckReport]:
+        """Run the due checks (all active ones when ``force``). A stop request ends the tick between checks."""
         now = self.clock.now()
         if self._last_recovery is None or (now - self._last_recovery) >= timedelta(
                 seconds=self.settings.scheduler_recovery_interval_seconds):
@@ -151,6 +152,9 @@ class Scheduler:
             self._last_check = dict(self.repository.last_check_times())
         reports = []
         for schedule in sorted(self.active_schedules(), key=lambda s: (s.priority, s.key)):
+            if stop is not None and stop.is_set():
+                logger.info("Stop requested: remaining checks of this tick skipped")
+                break
             now = self.clock.now()
             if not force and not schedule.is_due(self._last_check.get(schedule.key), now):
                 continue
@@ -224,6 +228,9 @@ class Scheduler:
 
     # ------------------------------------------------------------------ main loop
     def run(self, stop: StopSignal) -> None:
+        if stop.is_set():                  # e.g. the stop file exists: no lock, no recovery, no catch-up
+            logger.info("pi-scheduler not started: stop requested before start-up (%s)", stop.reason)
+            return
         lock = self.locks.try_acquire(SCHEDULER_LOCK) if self.locks is not None else None
         if self.locks is not None and lock is None:
             raise SchedulerAlreadyRunning("another pi-scheduler is running (scheduler advisory lock is held)")
@@ -232,8 +239,10 @@ class Scheduler:
             logger.info("pi-scheduler started: %d of %d schedule(s) active%s", len(active),
                         len(self.config.schedules),
                         "" if self.settings.scheduler_global_enable else " (SCHEDULER_GLOBAL_ENABLE=false)")
-            self.recover(self.clock.now())
-            self.tick(force=True)              # catch-up check after (re)start
+            if not stop.is_set():
+                self.recover(self.clock.now())
+            if not stop.is_set():
+                self.tick(force=True, stop=stop)   # catch-up check after (re)start, unless a stop is pending
             while not stop.is_set():
                 try:
                     self.repository.beat(self.process_id, "scheduler", self.clock.now(),
@@ -244,7 +253,7 @@ class Scheduler:
                     break
                 self.ensure_lock(lock)         # outside the try below: a lost lock must end the process
                 try:
-                    self.tick()
+                    self.tick(stop=stop)
                 except Exception:   # a database hiccup must not end the service; next tick retries
                     logger.exception("Scheduler tick failed; retrying on the next tick")
         finally:

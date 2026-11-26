@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -148,7 +147,13 @@ def test_restart_catches_up_immediately_and_recovers_expired_leases() -> None:
     sched2, _repo, _clock, checkers2 = make_scheduler([s], {"CATCH_KEY": [new_data(detection("d2", "v1"))]},
                                                       repo=repo, clock=clock)
     stop = StopSignal()
-    threading.Timer(0.05, lambda: stop.request("test")).start()
+    beat = repo.beat
+
+    def beat_then_stop(*args, **kwargs):                        # first heartbeat = after the catch-up check
+        beat(*args, **kwargs)
+        stop.request("test")
+
+    repo.beat = beat_then_stop
     sched2.run(stop)
     assert repo.job(job_id).status is JobStatus.RETRY_WAIT and "lease expired" in repo.job(job_id).last_error
     assert len(checkers2["CATCH_KEY"].contexts) == 1             # catch-up check at start, outside the window
