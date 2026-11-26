@@ -191,27 +191,33 @@ def test_states_od_ud_layout_is_recorded_and_has_no_ace_values() -> None:
     result, _ = parse_states(wb())
     assert result.layouts == {"C": LAYOUT_OD_UD, "J": LAYOUT_OD_UD}
     assert not any("ace_max_positive_mw" in r.raw for r in result.records)
+    for record in result.records:   # reports before 2026-11-18: the ACE columns stay NULL
+        assert record.values["max_ace_pos_mw"] is None and record.values["max_ace_neg_mw"] is None
 
 
-def test_states_ace_layout_keeps_od_ud_null_and_ace_in_raw() -> None:
+ACE_KEYS = ("max_od_mw", "max_ud_mw", "max_ace_pos_mw", "max_ace_neg_mw")
+
+
+def test_states_ace_layout_stores_ace_and_keeps_od_ud_null() -> None:
     # From report date 2026-11-18 the eighth column is "ACE²(Max) +ve/ -ve (MW)" (Area Control Error) in C and J.
     result, has_j = parse_states(wb(peak_layout="ace"))
     assert has_j and not result.failures and result.layouts == {"C": LAYOUT_ACE, "J": LAYOUT_ACE}
     assert len(result.records) == 34 + 2 + 4
-    for record in result.records:   # ACE is never written to the OD/UD columns, and there is no ACE column
+    for record in result.records:   # ACE is never written to the OD/UD columns
         assert record.values["max_od_mw"] is None and record.values["max_ud_mw"] is None
-        assert not any("ace" in key for key in record.values)
     dh = next(r for r in result.records if r.values["area_code"] == "DH")
+    # values and signs as published: "65/ -108" -> +65, -108 (migration 0010 columns)
+    assert (dh.values["max_ace_pos_mw"], dh.values["max_ace_neg_mw"]) == (Decimal("65.000"), Decimal("-108.000"))
     assert (dh.raw["ace_max_positive_mw"], dh.raw["ace_max_negative_mw"]) == ("65.000", "-108.000")
     assert dh.raw["max_ace"] == "65/ -108"   # the published cell text is kept as well
     balco = next(r for r in result.records if r.values["area_code"] == "BALCO")
-    assert (balco.raw["section"], balco.raw["ace_max_positive_mw"], balco.raw["ace_max_negative_mw"]) == (
-        "J", "100.000", "-200.000")
+    assert (balco.raw["section"], balco.values["max_ace_pos_mw"], balco.values["max_ace_neg_mw"]) == (
+        "J", Decimal("100.000"), Decimal("-200.000"))
     # every other value is parsed exactly as in the OD/UD layout
     old = {r.values["area_code"]: r.values for r in parse_states(wb())[0].records}
     for record in result.records:
-        same = {k: v for k, v in old[record.values["area_code"]].items() if k not in ("max_od_mw", "max_ud_mw")}
-        assert {k: v for k, v in record.values.items() if k not in ("max_od_mw", "max_ud_mw")} == same
+        same = {k: v for k, v in old[record.values["area_code"]].items() if k not in ACE_KEYS}
+        assert {k: v for k, v in record.values.items() if k not in ACE_KEYS} == same
 
 
 def test_states_ace_in_section_c_only_and_single_ace_number() -> None:
@@ -222,8 +228,10 @@ def test_states_ace_in_section_c_only_and_single_ace_number() -> None:
     pb = next(r for r in result.records if r.values["area_code"] == "PB")
     assert (pb.values["max_od_mw"], pb.raw["ace_max_positive_mw"], pb.raw["ace_max_negative_mw"]) == (
         None, "512.000", None)
+    assert (pb.values["max_ace_pos_mw"], pb.values["max_ace_neg_mw"]) == (Decimal("512.000"), None)  # missing stays NULL
     balco = next(r.values for r in result.records if r.values["area_code"] == "BALCO")   # section J: OD/UD
     assert (balco["max_od_mw"], balco["max_ud_mw"]) == (Decimal("100.000"), Decimal("-200.000"))
+    assert (balco["max_ace_pos_mw"], balco["max_ace_neg_mw"]) == (None, None)
 
 
 @pytest.mark.parametrize("layout", ["both", "neither"])
@@ -233,7 +241,7 @@ def test_states_need_exactly_one_of_od_ud_or_ace(layout: str) -> None:
 
 
 @pytest.mark.parametrize(("layout", "expected"), [("ace", 1), ("od_ud", 0)])
-def test_states_pipeline_one_ace_not_stored_warning_per_workbook(layout: str, expected: int) -> None:
+def test_states_pipeline_one_ace_layout_note_per_workbook(layout: str, expected: int) -> None:
     content = workbook_bytes(D, peak_layout=layout)
     created = datetime(2026, 11, 11, 10, 40, tzinfo=IST)
     entry = api.ListingEntry(1, "10.11.26_NLDC_PSP", D, "files/grdw/2026/11/10.11.26_NLDC_PSP_1.xls", created, None,
@@ -245,11 +253,14 @@ def test_states_pipeline_one_ace_not_stored_warning_per_workbook(layout: str, ex
     pipeline = StatesPipeline(settings=Settings(_env_file=None, log_to_file=False), database=object(),
                               raw_storage=object(), workbooks=[PreparedWorkbook(entry, document, None, avail)])
     parsed = pipeline.parse(document, None)
-    issues = [i for i in pipeline.document_issues(document, parsed, None) if i.issue_code == "ACE_NOT_STORED"]
+    all_issues = pipeline.document_issues(document, parsed, None)
+    assert not [i for i in all_issues if i.issue_code == "ACE_NOT_STORED"]   # stored since migration 0010
+    issues = [i for i in all_issues if i.issue_code == "ACE_LAYOUT"]
     assert len(issues) == expected
     if expected:
-        assert issues[0].severity is Severity.WARNING and "40 area(s)" in issues[0].issue_description
+        assert issues[0].severity is Severity.INFO and "40 area(s)" in issues[0].issue_description
         assert "C+J" in issues[0].issue_description and all(r.values["max_od_mw"] is None for r in parsed.records)
+        assert all(r.values["max_ace_pos_mw"] is not None for r in parsed.records)
 
 
 def test_states_unknown_name_bad_value_and_region_label_mismatch() -> None:

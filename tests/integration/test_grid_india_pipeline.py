@@ -999,3 +999,27 @@ def test_timeseries_rerun_revision_and_reprocess(conn: Connection, settings: Set
     assert _run(conn, settings, storage, mock, sections=["timeseries"]).sections["timeseries"].result.records_inserted == 0
     again = _run(conn, settings, storage, mock, sections=["timeseries"], reprocess=True).sections["timeseries"].result
     assert again.records_inserted == 0 and len(_rows(conn, TS)) == 97
+
+
+# ------------------------------------------------------------------- ACE (migration 0010_grid_state_ace)
+
+def test_ace_layout_is_stored_in_the_ace_columns_and_od_ud_layout_leaves_them_null(
+        conn: Connection, settings: Settings, storage: RawStorageManager) -> None:
+    ace_day = date(2026, 11, 11)
+    mock = MockGridIndia([FileSpec(D, workbook_bytes(D)), FileSpec(ace_day, workbook_bytes(ace_day, peak_layout="ace"))])
+
+    summary = _run(conn, settings, storage, mock, start=D, end=ace_day, sections=["states"])
+
+    assert summary.ok
+    rows = {(r.report_date, r.area_code): r for r in _rows(conn, "grid_state_power_supply")}
+    od_ud, ace = rows[(D, "DH")], rows[(ace_day, "DH")]
+    assert (od_ud.max_od_mw, od_ud.max_ud_mw, od_ud.max_ace_pos_mw, od_ud.max_ace_neg_mw) == (
+        Decimal("65.000"), Decimal("-108.000"), None, None)                    # before 18-Nov: OD/UD, ACE NULL
+    assert (ace.max_od_mw, ace.max_ud_mw, ace.max_ace_pos_mw, ace.max_ace_neg_mw) == (
+        None, None, Decimal("65.000"), Decimal("-108.000"))                    # ACE layout: signs as published
+    assert all(r.max_ace_pos_mw is not None for (day, _), r in rows.items() if day == ace_day)
+    run_ids = {s.result.ingestion_run_id for s in summary.sections.values()}
+    codes = {c for run in run_ids for c, _sev in _issues(conn, run)}
+    assert "ACE_NOT_STORED" not in codes and "ACE_LAYOUT" in codes
+    again = _run(conn, settings, storage, mock, start=D, end=ace_day, sections=["states"])
+    assert again.sections["states"].result.records_inserted == 0               # re-run: nothing duplicated

@@ -254,9 +254,10 @@ REQUIRED_STATE_COLUMNS = frozenset({"max_demand_met_mw", "energy_met_mu", "drawa
 # The eighth column of sections C and J. Exactly one of the two must be present:
 #   OD_UD - "Max OD(+)/ UD(-) (MW)" (older: "Max OD (MW)"), up to report date 2026-11-17;
 #   ACE   - "ACE²(Max) +ve/ -ve (MW)", Area Control Error, from report date 2026-11-18.
-# ACE is a different measure from maximum over/under-drawal, so it is never written to max_od_mw / max_ud_mw:
-# those stay NULL and the ACE pair is kept in the record's raw data (and in the raw workbook). Columns for it
-# are prepared in migration 0010_grid_state_ace (not applied).
+# ACE is a different measure from maximum over/under-drawal, so it is never written to max_od_mw / max_ud_mw
+# (NULL in the ACE layout). The ACE pair goes to max_ace_pos_mw / max_ace_neg_mw (migration
+# 0010_grid_state_ace, applied 2026-11-26), values and signs as published ('1772/ -433' -> 1772, -433); both
+# are NULL in the OD_UD layout. The pair is also kept in the record's raw data.
 LAYOUT_OD_UD = "OD_UD"
 LAYOUT_ACE = "ACE"
 PEAK_COLUMNS = {"max_od_ud": LAYOUT_OD_UD, "max_ace": LAYOUT_ACE}
@@ -326,6 +327,7 @@ def parse_states_table(grid: Grid, rows: range, *, section: str, report_date: da
         try:
             if layout == LAYOUT_OD_UD:
                 max_od, max_ud = _split_max_od_ud(grid.cell(r, columns[peak_column]))
+                ace_positive = ace_negative = None          # ACE is not published in this layout
             else:
                 max_od = max_ud = None   # not published in this layout; ACE is never mapped here
                 ace_positive, ace_negative = _split_max_od_ud(grid.cell(r, columns[peak_column]))
@@ -345,6 +347,8 @@ def parse_states_table(grid: Grid, rows: range, *, section: str, report_date: da
                 "od_ud_mu": _number(grid.cell(r, columns["od_ud_mu"]), 4),
                 "max_od_mw": max_od,
                 "max_ud_mw": max_ud,
+                "max_ace_pos_mw": ace_positive,
+                "max_ace_neg_mw": ace_negative,
                 "energy_shortage_mu": _number(grid.cell(r, columns["energy_shortage_mu"]), 4),
             }
         except ValueError as exc:

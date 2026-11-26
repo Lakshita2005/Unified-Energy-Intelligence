@@ -257,16 +257,16 @@ class StatesPipeline(_PspSectionPipeline):
                                            Severity.WARNING, str(day)))
         ace_sections = sorted(s for s, layout in result.layouts.items() if layout == LAYOUT_ACE)
         if ace_sections:
-            # One per workbook: the ACE measure has no column yet (migration 0010_grid_state_ace, not applied).
-            with_ace = sum(1 for r in result.records if r.raw.get("ace_max_positive_mw") is not None
-                           or r.raw.get("ace_max_negative_mw") is not None)
+            # One per workbook, informational: which measure the eighth column carries (0010_grid_state_ace).
+            with_ace = sum(1 for r in result.records if r.values.get("max_ace_pos_mw") is not None
+                           or r.values.get("max_ace_neg_mw") is not None)
             issues.append(DataQualityIssue(
-                self.target_table, "ACE_NOT_STORED",
+                self.target_table, "ACE_LAYOUT",
                 f"{document.document_name or day}: section(s) {'+'.join(ace_sections)} on {day} publish "
-                f"'ACE (Max) +ve/-ve (MW)' (Area Control Error) instead of 'Max OD(+)/UD(-) (MW)'. "
-                f"max_od_mw/max_ud_mw stored NULL; the ACE values of {with_ace} area(s) are kept in the record raw "
-                f"data and the raw workbook, not in the table (columns: migration 0010_grid_state_ace).",
-                Severity.WARNING, f"{day}|ACE"))
+                f"'ACE (Max) +ve/-ve (MW)' (Area Control Error) instead of 'Max OD(+)/UD(-) (MW)': "
+                f"max_ace_pos_mw/max_ace_neg_mw stored for {with_ace} area(s); max_od_mw/max_ud_mw are NULL "
+                f"(not published in this layout).",
+                Severity.INFO, f"{day}|ACE"))
         if has_j:
             issues.extend(self._bulk_consumer_checks(result.records, day))
         return issues

@@ -52,7 +52,7 @@ Purchase and sell bids, MCV, final scheduled volume, congestion and the GDAM sou
 
 ## Snapshot volumes and congestion (`pi.iex_market_snapshot`)
 
-Migration `0013_iex_market_snapshot` (prepared, **not applied**; it follows `0012_area_state_map`) adds the table. One row per market × delivery date × block. Natural key `(market_code, delivery_date, time_block)`, VERSION policy. Datasets `IEX_DAM_SNAPSHOT`, `IEX_GDAM_SNAPSHOT`, `IEX_RTM_SNAPSHOT`. Application privileges: `pi_app` gets **SELECT and INSERT only** (the VERSION loader never updates or deletes). The migration revokes the UPDATE and DELETE that the `pi` schema's default privileges would otherwise grant. Migration chain: `0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs`.
+Migration `0013_iex_market_snapshot` (applied 2026-11-26; it follows `0012_area_state_map`) adds the table. One row per market × delivery date × block. Natural key `(market_code, delivery_date, time_block)`, VERSION policy. Datasets `IEX_DAM_SNAPSHOT`, `IEX_GDAM_SNAPSHOT`, `IEX_RTM_SNAPSHOT`. Application privileges: `pi_app` gets **SELECT and INSERT only** (the VERSION loader never updates or deletes). The migration revokes the UPDATE and DELETE that the `pi` schema's default privileges would otherwise grant. Migration chain: `0010_grid_state_ace → 0012_area_state_map → 0013_iex_market_snapshot → 0011_pi_jobs`.
 
 | Column | DAM / RTM field | GDAM field |
 |---|---|---|
@@ -96,7 +96,7 @@ Seed the reference rows once with `python -m scripts.ingest_iex reference [--dry
 
 ### Bid area → state (`pi.area_state_map`)
 
-Migration `0012_area_state_map` (prepared, **not applied**; it follows `0010_grid_state_ace`) adds the table. `pi_app` gets **SELECT and INSERT only**: seeding reads and appends, never updates or deletes, and the migration revokes the UPDATE and DELETE granted by the schema's default privileges. After it is applied, seed it with `python -m scripts.ingest_iex area-states [--dry-run]`. Price runs do not use the table.
+Migration `0012_area_state_map` (applied 2026-11-26; it follows `0010_grid_state_ace`) adds the table. `pi_app` gets **SELECT and INSERT only**: seeding reads and appends, never updates or deletes, and the migration revokes the UPDATE and DELETE granted by the schema's default privileges. After it is applied, seed it with `python -m scripts.ingest_iex area-states [--dry-run]`. Price runs do not use the table.
 - Each row maps a bid area to a state, or to a part of one in `state_part` (Goa and Puducherry are split between areas). Validity is `[effective_from, effective_to)` in delivery dates; `effective_to` NULL means still valid.
 - Every row carries `source_name`, `source_url`, `source_published_on`, `verification_status` and `notes`. **No row is OFFICIAL**: the rows rest on IEX's 2016 table as reproduced in an academic paper, a 2020 Regulatory Assistance Project analysis (Telangana in S1; S2 without Kerala), and a 2024 KSERC order (Kerala in S3). `effective_from` is the earliest date a source shows the mapping, not the date IEX introduced it.
 - Known gap: Kerala has no row from 2019-03-01 to 2020-07-09, between the last source placing it in S2 and the first placing it in S3.
