@@ -208,7 +208,7 @@ calling the existing ingestion runners. There is no Celery or broker. The schedu
 retries with exponential backoff, advisory locks and restart recovery.
 
 **Deployed, not active:**
-- `IEX_DAM`, `IEX_GDAM`, `IEX_RTM`, `GRID_INDIA_PSP`, the three CEA schedules (`CEA_COAL_DAILY`, `CEA_DGR_DAILY`, `CEA_PSP_MONTHLY`), `MOSDAC_SOLAR`, `MOSDAC_WIND` (paused in the database) and `NPP_DEMAND`, `NPP_GENERATION` are enabled in `config/scheduler.toml` (approved 2026-11-26); all other schedules are disabled;
+- `IEX_DAM`, `IEX_GDAM`, `IEX_RTM`, `GRID_INDIA_PSP`, the three CEA schedules (`CEA_COAL_DAILY`, `CEA_DGR_DAILY`, `CEA_PSP_MONTHLY`), `MOSDAC_SOLAR`, `MOSDAC_WIND` (paused in the database), `NPP_DEMAND`, `NPP_GENERATION` and `OPEN_METEO_FORECAST` (free API, company approval 2026-11-26) are enabled in `config/scheduler.toml`; `OPEN_METEO_HISTORICAL` is disabled;
 - migrations up to `0011_pi_jobs` are applied, and the 13 schedules are synced to `pi_jobs.schedule` (all disabled);
 - two Windows Task Scheduler tasks (`\PI\pi-scheduler`, `\PI\pi-worker`, account `LOCAL SERVICE`) are registered and disabled.
 

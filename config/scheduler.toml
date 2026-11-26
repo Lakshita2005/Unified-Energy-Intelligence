@@ -1,8 +1,8 @@
 # Availability-based scheduler configuration (src/scheduler, docs/scheduler.md).
 #
 # ENABLED (approved 2026-11-26): IEX_DAM, IEX_GDAM, IEX_RTM, GRID_INDIA_PSP, CEA_COAL_DAILY, CEA_DGR_DAILY,
-# CEA_PSP_MONTHLY, MOSDAC_SOLAR, MOSDAC_WIND, NPP_DEMAND, NPP_GENERATION. Every other schedule (Open-Meteo) is
-# disabled. MOSDAC_WIND is paused in the database (pi_jobs disable) while its endpoint fails for 5 plants.
+# CEA_PSP_MONTHLY, MOSDAC_SOLAR, MOSDAC_WIND, NPP_DEMAND, NPP_GENERATION, OPEN_METEO_FORECAST (free API; company
+# approval confirmed 2026-11-26). OPEN_METEO_HISTORICAL stays disabled. MOSDAC_WIND is paused in the database (pi_jobs disable) while its endpoint fails for 5 plants.
 # A schedule runs only when ALL of these hold (re-checked every tick):
 #   1. SCHEDULER_GLOBAL_ENABLE=true in the environment (.env),
 #   2. enabled = true below,
@@ -197,7 +197,7 @@ kind = "wind"
 key = "OPEN_METEO_FORECAST"
 description = "Open-Meteo forecast refresh every 6 hours (free endpoint: non-commercial use only)"
 checker = "open_meteo_forecast"
-enabled = false
+enabled = true
 source = "OPEN_METEO"
 datasets = ["OPEN_METEO_FORECAST"]
 lock_group = "OPEN_METEO"

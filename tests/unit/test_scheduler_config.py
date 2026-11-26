@@ -32,7 +32,8 @@ def at(hhmm: str, day: int = 25) -> datetime:
 APPROVED_ENABLED = {"IEX_DAM", "IEX_GDAM", "IEX_RTM", "GRID_INDIA_PSP",           # approved 2026-11-26
                     "CEA_COAL_DAILY", "CEA_DGR_DAILY", "CEA_PSP_MONTHLY",         # approved 2026-11-26
                     "MOSDAC_SOLAR", "MOSDAC_WIND",                                # approved 2026-11-26
-                    "NPP_DEMAND", "NPP_GENERATION"}                               # approved 2026-11-26
+                    "NPP_DEMAND", "NPP_GENERATION",                               # approved 2026-11-26
+                    "OPEN_METEO_FORECAST"}                                        # approved 2026-11-26 (free API)
 
 
 def test_shipped_configuration_is_valid_and_only_approved_schedules_are_enabled() -> None:

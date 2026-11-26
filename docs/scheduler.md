@@ -16,7 +16,8 @@ pipelines themselves are unchanged.
 > | MOSDAC | `MOSDAC_SOLAR` | on | on | running since 12:11 (8 plants) |
 > | MOSDAC | `MOSDAC_WIND` | on | **off (paused)** | the wind endpoint returns HTTP 500 for 5 of 8 plants; 3 plants of the 25-Nov series stored. Recovery: see [MOSDAC wind](#mosdac-wind-paused) |
 > | NPP | `NPP_DEMAND`, `NPP_GENERATION` | on | **off** | readiness verified; waiting for the owner's database switch (`pi_jobs enable`) |
-> | Open-Meteo | `OPEN_METEO_FORECAST`, `OPEN_METEO_HISTORICAL` | off | off | **blocked**: the free API is for non-commercial use only; internal use by a company needs a decision or a paid plan |
+> | Open-Meteo | `OPEN_METEO_FORECAST` | on | on | free API (company approval confirmed 2026-11-26), 8 plants, refresh at 01:30, 07:30, 13:30, 19:30 |
+> | Open-Meteo | `OPEN_METEO_HISTORICAL` | off | off | disabled until approved separately |
 >
 > Activation needs separate approvals: [Activation checklist](#activation-checklist).
 
@@ -478,7 +479,7 @@ COMMIT;
 ## Known limitations
 
 - **MOSDAC wind outage (2026-11-26).** The wind endpoint answers HTTP 500 within about 100 ms for ASPL, GSPL_GAP, GSPL_GUM, NSPL and TSPL (solar works for all 8 plants). The check probes one reference plant (ESEPL), which works, so it cannot see a per-plant outage; the job's per-plant results and PARTIAL status do.
-- **Open-Meteo is not activated.** Its free API is for non-commercial use only (the terms list "undisclosed research at commercial entities" as commercial). Activating it needs a written decision that the internal use is non-commercial, or a paid plan (`OPEN_METEO_PLAN=commercial` with `OPEN_METEO_API_KEY`).
+- **Open-Meteo runs on the free API.** The free plan is for non-commercial use; the company's approval to use it was confirmed on 2026-11-26. Data is CC BY 4.0: credit "Weather data by Open-Meteo.com". Only the forecast is enabled; the historical schedule stays disabled until approved separately.
 - **NPP volume.** NPP updates today's data during the day; each newer `updated_on` is a new version and a small job (up to about 48 per day per kind; only changed rows are inserted, each fetch is kept as a raw document).
 - **Probe 404s are logged at ERROR.** A check for a not-yet-published CEA report logs `HTTP GET ... returned 404` at ERROR level in `pi-scheduler.log` although the check correctly records NOT_YET_PUBLISHED; harmless, but noisy.
 - **Queue SQL tested on PostgreSQL inside rolled-back transactions only.** `tests/integration/test_scheduler_queue.py` passed on PostgreSQL 18.7 as `pi_app` (the retention test needs the owner). The unit tests use an in-memory repository with the same semantics, plus a recording fake connection that checks which statements share a transaction. No job has yet run end to end through a real runner from the queue.

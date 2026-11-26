@@ -479,12 +479,13 @@ def test_open_meteo_daily_call_budget_is_enforced_on_the_free_plan() -> None:
     assert shared and "170 calls/day" in shared                            # the budget is shared
 
 
-def test_shipped_open_meteo_schedules_stay_disabled_and_within_the_free_limit() -> None:
+def test_shipped_open_meteo_forecast_only_and_within_the_free_limit() -> None:
     from src.scheduler.checkers.open_meteo import estimated_daily_calls
 
     shipped = load_scheduler_config(PROJECT_ROOT / "config" / "scheduler.toml").schedules
     om = [shipped[k] for k in ("OPEN_METEO_FORECAST", "OPEN_METEO_HISTORICAL")]
-    assert all(not s.enabled for s in om)
+    # forecast approved for the free API on 2026-11-26; historical stays disabled until approved separately
+    assert shipped["OPEN_METEO_FORECAST"].enabled and not shipped["OPEN_METEO_HISTORICAL"].enabled
     assert sum(estimated_daily_calls(s, 50) for s in om) < 10_000          # even with 50 locations
 
 
